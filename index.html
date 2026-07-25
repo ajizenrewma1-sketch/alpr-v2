@@ -13,26 +13,228 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.21.4/babel.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Prompt', 'sans-serif'],
+                    },
+                    colors: {
+                        sidebar: '#151923',
+                        sidebarHover: '#1f2533',
+                        sidebarActive: '#262d3d',
+                        brandYellow: '#f59e0b',
+                        bgLight: '#f4f6f8',
+                    }
+                }
+            }
+        }
+    </script>
     <style>
-        body { font-family: 'Prompt', sans-serif; background-color: #f1f5f9; }
+        body { font-family: 'Prompt', sans-serif; background-color: #f4f6f8; margin: 0; overflow: hidden; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState } = React;
+        const { useState, useEffect } = React;
 
         function App() {
+const GAS_URL = "https://script.google.com/macros/s/AKfycbxfTQgd4er49wl7qn7CpRu5y1ccSe6ooWjTDzkUinl7l4HWPOXpUn3xoENJAepeb5U6/exec";
+
+const fetchHistoryFromCloud = async () => {
+    try {
+        const response = await fetch(`${GAS_URL}?action=getHistory`);
+        const data = await response.json();
+        if (Array.isArray(data)) {
+            setHistoryItems(data);
+        }
+    } catch (err) {
+        console.error("Failed to load history:", err);
+    }
+};
+
+useEffect(() => {
+    fetchHistoryFromCloud(); // โหลดประวัติจาก Google Sheets ทันทีที่เปิดเว็บ
+    
+    const timer = setInterval(() => {
+        const now = new Date();
+        setCurrentTime(now);
+        // ... (ระบบนับถอยหลังหมดอายุ 24 ชม. คงเดิม)
+    }, 1000);
+    return () => clearInterval(timer);
+}, []);
+
+            const parseLocalDate = (dateStr) => {
+                if (!dateStr) return new Date();
+                const [datePart, timePart] = dateStr.split(' ');
+                const [y, m, d] = datePart.split('-').map(Number);
+                const [h, min, s] = timePart.split(':').map(Number);
+                return new Date(y, m - 1, d, h, min, s);
+            };
+
+            const [activeMenu, setActiveMenu] = useState('home');
             const [fileAll, setFileAll] = useState({ name: '', headers: [], rows: [], originalWs: null });
             const [fileR05, setFileR05] = useState({ name: '', headers: [], rows: [], originalWs: null });
-            
             const [keyColsAll, setKeyColsAll] = useState([]);
             const [keyColsR05, setKeyColsR05] = useState([]);
-            
             const [results, setResults] = useState(null);
             const [isProcessing, setIsProcessing] = useState(false);
             const [showDuplicateModal, setShowDuplicateModal] = useState(false);
+            const [resetKey, setResetKey] = useState(0);
+            const [currentTime, setCurrentTime] = useState(new Date());
+            const [historyItems, setHistoryItems] = useState([]);
+
+            useEffect(() => {
+                const timer = setInterval(() => {
+                    const now = new Date();
+                    setCurrentTime(now);
+
+                    setHistoryItems(prevItems =>
+                        prevItems.map(item => {
+                            if (item.status === 'expired' || item.status === 'error') return item;
+                            const createdDate = parseLocalDate(item.date);
+                            const expiryDate = new Date(createdDate.getTime() + 24 * 60 * 60 * 1000);
+                            
+                            if (now >= expiryDate) {
+                                if (item.driveFileId) deleteFileFromGoogleDrive(item.driveFileId);
+                                return { ...item, status: 'expired', driveFileId: '' };
+                            }
+                            return item;
+                        })
+                    );
+                }, 1000);
+                return () => clearInterval(timer);
+            }, []);
+
+            // ฟังก์ชันสร้าง Workbook จาก originalWs และอุ้มสูตร/รูปภาพมาด้วย 100% (ไม่ให้เป็น 0)
+            const buildMatchedWorkbook = (matchedRows) => {
+                if (!fileAll.originalWs) return null;
+                const originalWs = fileAll.originalWs;
+                const range = XLSX.utils.decode_range(originalWs['!ref']);
+                const newWs = {};
+                let newRowIdx = 0;
+
+                const copyRow = (sourceRowIdx, destRowIdx) => {
+                    for (let C = range.s.c; C <= range.e.c; C++) {
+                        const cellAddress = XLSX.utils.encode_cell({ r: sourceRowIdx, c: C });
+                        const cell = originalWs[cellAddress];
+                        if (cell) {
+                            const newCellAddress = XLSX.utils.encode_cell({ r: destRowIdx, c: C });
+                            const copiedCell = JSON.parse(JSON.stringify(cell));
+                            
+                            // หากเป็นเซลล์สูตร (เช่น =IMAGE) ให้เคลียร์ค่า v ออก เพื่อบังคับให้ Excel รันสูตรใหม่และไม่แสดงค่า 0 ค้างไว้
+                            if (copiedCell.f) {
+                                delete copiedCell.v;
+                            }
+                            
+                            newWs[newCellAddress] = copiedCell;
+                        }
+                    }
+                };
+
+                // คัดลอก Header (แถวแรก)
+                copyRow(0, newRowIdx++);
+                
+                // คัดลอกแถวที่ Match โดยอิงจาก _originalRowIdx
+                matchedRows.forEach(row => {
+                    if (row._originalRowIdx !== undefined) {
+                        copyRow(row._originalRowIdx, newRowIdx++);
+                    }
+                });
+
+                newWs['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: newRowIdx - 1, c: range.e.c } });
+                const newWb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(newWb, newWs, "Matched_Result");
+                return newWb;
+            };
+
+            const uploadToGoogleDrive = async (fileName, matchedRows) => {
+                const GAS_URL = "https://script.google.com/macros/s/AKfycbxfTQgd4er49wl7qn7CpRu5y1ccSe6ooWjTDzkUinl7l4HWPOXpUn3xoENJAepeb5U6/exec";
+
+                try {
+                    // ใช้ฟังก์ชันสร้าง Workbook ตัวเดียวกัน เพื่อรักษาสูตรและรูปภาพไว้ ไม่ให้กลายเป็น 0 บนคลาวด์
+                    const wb = buildMatchedWorkbook(matchedRows);
+                    if (!wb) return "error_file_id";
+
+                    const base64Data = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+
+                    const payload = {
+                        filename: fileName || "M-Flow_Report.xlsx",
+                        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        base64Data: base64Data
+                    };
+
+                    const response = await fetch(GAS_URL, {
+                        method: "POST",
+                        body: JSON.stringify(payload)
+                    });
+
+                    const result = await response.json();
+                    return result.status === "success" ? result.fileId : "error_file_id";
+                } catch (error) {
+                    return "error_file_id";
+                }
+            };
+
+            const deleteFileFromGoogleDrive = async (fileId) => {
+                if (!fileId) return;
+                const GAS_URL = "https://script.google.com/macros/s/AKfycbxfTQgd4er49wl7qn7CpRu5y1ccSe6ooWjTDzkUinl7l4HWPOXpUn3xoENJAepeb5U6/exec";
+                try {
+                    await fetch(`${GAS_URL}?action=delete&fileId=${fileId}`);
+                } catch (err) {
+                    console.error("Failed to delete file from cloud:", err);
+                }
+            };
+
+            const handleDownloadHistory = (item) => {
+                if (item.status === 'expired' || item.status === 'error' || !item.driveFileId) {
+                    alert("ไม่สามารถดาวน์โหลดได้ เนื่องจากไฟล์หมดอายุ เกิดข้อผิดพลาด หรือไม่พบข้อมูลตรงกัน");
+                    return;
+                }
+                alert(`กำลังดาวน์โหลดไฟล์ผลลัพธ์จาก Google Drive Cloud (ID: ${item.driveFileId})...`);
+            };
+
+            const handleDeleteHistory = async (id) => {
+    const item = historyItems.find(i => i.id === id);
+    if (item) {
+        await fetch(`${GAS_URL}?action=delete&fileId=${item.driveFileId || ''}&id=${id}`);
+    }
+    setHistoryItems(prev => prev.filter(i => i.id !== id));
+};
+
+            const formatTimeRemaining = (dateStr) => {
+                const createdDate = parseLocalDate(dateStr);
+                const expiryDate = new Date(createdDate.getTime() + 24 * 60 * 60 * 1000);
+                const diff = expiryDate - currentTime;
+
+                if (diff <= 0) return 'หมดอายุ';
+
+                const hours = Math.floor(diff / (1000 * 60 * 60));
+                const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+
+                if (hours > 0) return `${hours} ชม. ${minutes} น.`;
+                else if (minutes > 0) return `${minutes} น. ${seconds} วิ.`;
+                else return `${seconds} วิ.`;
+            };
+
+            const handleReset = () => {
+                setFileAll({ name: '', headers: [], rows: [], originalWs: null });
+                setFileR05({ name: '', headers: [], rows: [], originalWs: null });
+                setKeyColsAll([]);
+                setKeyColsR05([]);
+                setResults(null);
+                setIsProcessing(false);
+                setShowDuplicateModal(false);
+                setResetKey(prev => prev + 1);
+            };
 
             const handleFileUpload = (e, type) => {
                 const file = e.target.files[0];
@@ -54,12 +256,9 @@
                     const reader = new FileReader();
                     reader.onload = (evt) => {
                         const data = new Uint8Array(evt.target.result);
-                        // อ่านไฟล์แบบ cellFormula: true เพื่อให้มันเก็บค่าสูตร (=IMAGE) ไว้ไม่ลบหาย
                         const workbook = XLSX.read(data, { type: 'array', cellFormula: true });
                         const firstSheetName = workbook.SheetNames[0];
                         const worksheet = workbook.Sheets[firstSheetName];
-                        
-                        // ใช้การอ่านแบบ Array of Arrays (header: 1) เพื่อล็อค Index ของแถวให้ตรงกับต้นฉบับ 100%
                         const aoa = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "" });
                         
                         const rawHeaders = aoa.length > 0 ? aoa[0] : [];
@@ -68,7 +267,7 @@
                         const rows = [];
                         for (let i = 1; i < aoa.length; i++) {
                             const rowData = aoa[i];
-                            if (!rowData) continue; // ข้ามแถวว่าง
+                            if (!rowData) continue; 
                             
                             const rowObj = {};
                             let isEmpty = true;
@@ -78,7 +277,6 @@
                             });
                             
                             if (!isEmpty) {
-                                // จุดสำคัญที่สุด: เก็บหมายเลขบรรทัดเดิมจากใน Excel เอาไว้!
                                 rowObj._originalRowIdx = i;
                                 rows.push(rowObj);
                             }
@@ -88,7 +286,7 @@
                             name: file.name,
                             headers: headers,
                             rows: rows,
-                            originalWs: worksheet // เก็บชีท Excel ต้นฉบับที่มีสูตรไว้ใช้งานตอน Save
+                            originalWs: worksheet 
                         };
 
                         if (type === 'ALL') setFileAll(processedData);
@@ -102,11 +300,7 @@
 
             const processValue = (val, colName, isAllFile) => {
                 let s = String(val || '').trim();
-                
-                if (isAllFile && colName === "เวลา") {
-                    s = s.replace(/\.\d{3}$/, '');
-                }
-
+                if (isAllFile && colName === "เวลา") s = s.replace(/\.\d{3}$/, '');
                 if (colName === "เวลา") {
                     const parts = s.split(':');
                     if (parts.length > 0 && parts[0].length === 1) {
@@ -121,248 +315,523 @@
                 return cols.map(col => processValue(row[col], col, isAllFile)).join('|');
             };
 
-            const runMatching = () => {
-                if (keyColsAll.length === 0 || keyColsR05.length === 0) {
-                    alert("กรุณาเลือกคอลัมน์สำหรับสร้าง Key ให้ครบถ้วน");
-                    return;
+            const runMatching = async () => {
+    if (keyColsAll.length === 0 || keyColsR05.length === 0) {
+        alert("กรุณาเลือกคอลัมน์สำหรับสร้าง Key ให้ครบถ้วน");
+        return;
+    }
+    setIsProcessing(true);
+    setActiveMenu('history');
+
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    const seconds = String(d.getSeconds()).padStart(2, '0');
+    const nowStr = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+
+    const newHistoryId = historyItems.length > 0 ? Math.max(...historyItems.map(i => i.id)) + 1 : 1;
+    const initialHistoryItem = {
+        id: newHistoryId,
+        type: 'ชนข้อมูล (Match)',
+        condition: 'All + R05 (ALPR)',
+        date: nowStr,
+        status: 'processing',
+        progress: 50,
+        records: 0,
+        driveFileId: ''
+    };
+
+    // อัปเดต State ฝั่งหน้าเว็บ
+    setHistoryItems(prev => [initialHistoryItem, ...prev]);
+
+    // [เพิ่มใหม่] บันทึกประวัติสถานะ 'processing' ลง Google Sheets ทันที
+    try {
+        await fetch(GAS_URL, {
+            method: "POST",
+            body: JSON.stringify({ action: "saveHistory", ...initialHistoryItem })
+        });
+    } catch (err) {
+        console.error("Failed to save initial history to cloud:", err);
+    }
+
+    setTimeout(async () => {
+        const filteredR05 = fileR05.rows.filter(r => String(r["ประเภทระบบ"]) === "ALPR");
+        const mapR05 = new Map();
+        filteredR05.forEach(row => {
+            const key = generateKey(row, keyColsR05, false);
+            mapR05.set(key, true);
+        });
+
+        const matchedRows = [];
+        const keyCounts = {};
+
+        fileAll.rows.forEach(row => {
+            const key = generateKey(row, keyColsAll, true);
+            if (mapR05.has(key)) {
+                matchedRows.push(row);
+                keyCounts[key] = (keyCounts[key] || 0) + 1;
+            }
+        });
+
+        const duplicateDetails = Object.keys(keyCounts)
+            .filter(k => keyCounts[k] > 1)
+            .map(k => ({ key: k, count: keyCounts[k] }))
+            .sort((a, b) => b.count - a.count);
+
+        setResults({
+            totalAll: fileAll.rows.length,
+            totalR05: fileR05.rows.length,
+            totalR05ALPR: filteredR05.length,
+            matchedCount: matchedRows.length,
+            duplicateDetails: duplicateDetails,
+            data: matchedRows 
+        });
+        setIsProcessing(false);
+
+        const isNoMatch = matchedRows.length === 0;
+
+        if (isNoMatch) {
+            setHistoryItems(prev => prev.map(item => {
+                if (item.id === newHistoryId) {
+                    return { ...item, status: 'error', progress: 100, records: 0 };
                 }
+                return item;
+            }));
 
-                setIsProcessing(true);
-
-                const filteredR05 = fileR05.rows.filter(r => String(r["ประเภทระบบ"]) === "ALPR");
-
-                const mapR05 = new Map();
-                filteredR05.forEach(row => {
-                    const key = generateKey(row, keyColsR05, false);
-                    mapR05.set(key, true);
-                });
-
-                // กรองเฉพาะแถวที่เจอ และนับจำนวนคีย์เพื่อหาข้อมูลซ้ำ
-                const matchedRows = [];
-                const keyCounts = {};
-
-                fileAll.rows.forEach(row => {
-                    const key = generateKey(row, keyColsAll, true);
-                    if (mapR05.has(key)) {
-                        matchedRows.push(row);
-                        keyCounts[key] = (keyCounts[key] || 0) + 1;
+            // [เพิ่มใหม่] อัปเดตสถานะ error ลง Google Sheets เมื่อไม่พบข้อมูลที่ตรงกัน
+            try {
+                await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=error&records=0`);
+            } catch (err) {
+                console.error("Failed to update error history on cloud:", err);
+            }
+        } else {
+            try {
+                const fileId = await uploadToGoogleDrive("Matched_Result.xlsx", matchedRows);
+                
+                setHistoryItems(prev => prev.map(item => {
+                    if (item.id === newHistoryId) {
+                        return {
+                            ...item,
+                            status: 'done',
+                            progress: 100,
+                            records: matchedRows.length,
+                            driveFileId: fileId
+                        };
                     }
-                });
+                    return item;
+                }));
 
-                // หาคีย์ที่มีการซ้ำ (พบมากกว่า 1 ครั้งในไฟล์ ALL)
-                const duplicateDetails = Object.keys(keyCounts)
-                    .filter(k => keyCounts[k] > 1)
-                    .map(k => ({ key: k, count: keyCounts[k] }))
-                    .sort((a, b) => b.count - a.count); // เรียงจากซ้ำมากไปน้อย
-
-                setResults({
-                    totalAll: fileAll.rows.length,
-                    totalR05: fileR05.rows.length,
-                    totalR05ALPR: filteredR05.length,
-                    matchedCount: matchedRows.length,
-                    duplicateDetails: duplicateDetails,
-                    data: matchedRows 
-                });
-                setIsProcessing(false);
-            };
+                // [เพิ่มใหม่] อัปเดตสถานะ done, จำนวนเรคอร์ด และ Drive File ID ลง Google Sheets
+                await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=done&records=${matchedRows.length}&driveFileId=${fileId}`);
+            } catch (err) {
+                console.error("Failed to upload file or update history on cloud:", err);
+            }
+        }
+    }, 500);
+};
 
             const downloadResult = () => {
                 if (!results || results.data.length === 0) return;
-                
-                if (fileAll.originalWs) {
-                    // หากไฟล์เป็น Excel (มี originalWs) เราจะใช้วิธี 'คัดลอกเซลล์ดิบ' (Raw Cells)
-                    // เพื่อให้สูตรเช่น =IMAGE(...) ถูกส่งผ่านไปตรงๆ แบบไม่โดนแปลงเป็น 0
-                    const originalWs = fileAll.originalWs;
-                    const range = XLSX.utils.decode_range(originalWs['!ref']);
-                    const newWs = {};
-                    let newRowIdx = 0;
-
-                    // ฟังก์ชันคัดลอกแถวโดยก๊อปปี้ Object เซลล์ตรงๆ จาก SheetJS
-                    const copyRow = (sourceRowIdx, destRowIdx) => {
-                        for (let C = range.s.c; C <= range.e.c; C++) {
-                            const cellAddress = XLSX.utils.encode_cell({ r: sourceRowIdx, c: C });
-                            const cell = originalWs[cellAddress];
-                            if (cell) {
-                                const newCellAddress = XLSX.utils.encode_cell({ r: destRowIdx, c: C });
-                                // สำเนาเซลล์เพื่อรักษาประเภทของมันไว้ รวมถึงค่า f (formula)
-                                newWs[newCellAddress] = JSON.parse(JSON.stringify(cell));
-                            }
-                        }
-                    };
-
-                    // 1. คัดลอกแถว Header (แถวที่ 0)
-                    copyRow(0, newRowIdx++);
-
-                    // 2. คัดลอกเฉพาะแถวที่ผ่านการ Match เจอ โดยอ้างอิงจากเลขแถวเดิม (_originalRowIdx)
-                    results.data.forEach(row => {
-                        if (row._originalRowIdx !== undefined) {
-                            copyRow(row._originalRowIdx, newRowIdx++);
-                        }
-                    });
-
-                    // สร้างขอบเขตพื้นที่ให้ Sheet ใหม่
-                    newWs['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: newRowIdx - 1, c: range.e.c } });
-
-                    const newWb = XLSX.utils.book_new();
-                    XLSX.utils.book_append_sheet(newWb, newWs, "Matched_Result");
-                    XLSX.writeFile(newWb, "Matched_Result.xlsx");
+                const wb = buildMatchedWorkbook(results.data);
+                if (wb) {
+                    XLSX.writeFile(wb, "Matched_Result.xlsx");
                 } else {
-                    // กรณีเป็นไฟล์ CSV (ไม่มีสูตรแต่แรก)
-                    const exportData = results.data.map(row => {
-                        const newRow = { ...row };
-                        delete newRow._originalRowIdx; // เอาฟิลด์ระบบออก
-                        return newRow;
-                    });
-                    const worksheet = XLSX.utils.json_to_sheet(exportData);
-                    const workbook = XLSX.utils.book_new();
-                    XLSX.utils.book_append_sheet(workbook, worksheet, "Matched_Result");
-                    XLSX.writeFile(workbook, "Matched_Result.xlsx");
+                    alert("ไม่พบไฟล์ต้นฉบับสำหรับการคัดลอกเซลล์");
                 }
             };
 
-            return (
-                <div className="max-w-6xl mx-auto p-6 space-y-8">
-                    <header className="bg-indigo-900 text-white p-6 rounded-2xl shadow-xl">
-                        <h1 className="text-2xl font-bold">DataMatch Pro - ระบบชนข้อมูล</h1>
-                        <p className="opacity-80">อัปโหลดไฟล์, เลือกคอลัมน์คีย์, และดำเนินการเปรียบเทียบข้อมูล</p>
-                    </header>
+            const NavItem = ({ icon, label, id }) => (
+                <button 
+                    onClick={() => setActiveMenu(id)}
+                    className={`w-full flex items-center gap-3 px-6 py-3 text-sm transition-all duration-200 border-l-4 ${
+                        activeMenu === id 
+                        ? 'bg-sidebarActive border-brandYellow text-white font-medium' 
+                        : 'border-transparent text-slate-400 hover:bg-sidebarHover hover:text-slate-200'
+                    }`}
+                >
+                    <i className={`fa-solid ${icon} w-5 text-center ${activeMenu === id ? 'text-brandYellow' : ''}`}></i>
+                    <span>{label}</span>
+                </button>
+            );
 
-                    <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                        <h2 className="text-lg font-semibold mb-4 text-slate-700">1. อัปโหลดไฟล์</h2>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            <div>
-                                <label className="block text-sm font-medium mb-2">ไฟล์ All</label>
-                                <input type="file" onChange={(e) => handleFileUpload(e, 'ALL')} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"/>
-                                <p className="text-xs text-slate-400 mt-1">{fileAll.name}</p>
+            const renderHomeView = () => (
+                <div className="animate-fade-in space-y-6">
+                    <div>
+                        <p className="text-brandYellow text-sm font-semibold mb-1">ศูนย์ควบคุมการทำงาน</p>
+                        <h1 className="text-2xl font-bold text-slate-800">สวัสดี, ผู้ใช้งาน</h1>
+                        <p className="text-slate-500 text-sm mt-2">
+                            ระบบจัดการข้อมูลและออกรายงาน — เลือกเมนูเพื่อเริ่มต้นการทำงาน หรือตรวจสอบสถานะรายงานของคุณ
+                        </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-8 max-w-3xl">
+                        <div 
+                            onClick={() => setActiveMenu('match')}
+                            className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 hover:shadow-md hover:border-brandYellow/50 transition-all cursor-pointer group"
+                        >
+                            <div className="w-10 h-10 bg-orange-50 text-brandYellow rounded-lg flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                                <i className="fa-regular fa-file-lines text-lg"></i>
                             </div>
-                            <div>
-                                <label className="block text-sm font-medium mb-2">ไฟล์ R05</label>
-                                <input type="file" onChange={(e) => handleFileUpload(e, 'R05')} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100"/>
-                                <p className="text-xs text-slate-400 mt-1">{fileR05.name}</p>
+                            <h3 className="font-semibold text-slate-800 mb-2">ชนข้อมูล (Match)</h3>
+                            <p className="text-sm text-slate-500">
+                                ดึงข้อมูลไฟล์ All และ R05 — ตั้งค่า Key เพื่อค้นหา และส่งออกข้อมูลที่ตรงกันเป็นไฟล์ Excel
+                            </p>
+                        </div>
+                        <div 
+                            onClick={() => setActiveMenu('history')}
+                            className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 hover:shadow-md hover:border-brandYellow/50 transition-all cursor-pointer group"
+                        >
+                            <div className="w-10 h-10 bg-orange-50 text-brandYellow rounded-lg flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                                <i className="fa-solid fa-list-check text-lg"></i>
+                            </div>
+                            <h3 className="font-semibold text-slate-800 mb-2">ประวัติการทำงาน</h3>
+                            <p className="text-sm text-slate-500">
+                                ติดตามสถานะคิวงาน และดาวน์โหลดไฟล์ที่ดำเนินการเสร็จแล้วย้อนหลัง
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            const renderMatchView = () => (
+                <div className="animate-fade-in space-y-6 max-w-5xl">
+                    <div className="flex justify-between items-end">
+                        <div>
+                            <p className="text-brandYellow text-sm font-semibold mb-1">ปฏิบัติการ</p>
+                            <h1 className="text-2xl font-bold text-slate-800">ชนข้อมูลรายการผ่านทาง</h1>
+                            <p className="text-slate-500 text-sm mt-1">อัปโหลดไฟล์ ตั้งค่าเงื่อนไขการค้นหา แล้วกด "ค้นหาข้อมูล" เพื่อดูตัวอย่างหรือส่งออก</p>
+                        </div>
+                        {(fileAll.name || fileR05.name || results) && (
+                            <button onClick={handleReset} className="text-slate-500 hover:text-red-500 text-sm font-medium transition flex items-center gap-2 bg-white px-4 py-2 rounded-lg border border-slate-200 shadow-sm">
+                                <i className="fa-solid fa-rotate-right"></i> ล้างข้อมูล
+                            </button>
+                        )}
+                    </div>
+
+                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                        <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+                            <h2 className="text-sm font-semibold text-slate-700 mb-4 flex items-center gap-2">
+                                <span className="bg-slate-200 text-slate-600 w-6 h-6 rounded-full flex items-center justify-center text-xs">1</span> 
+                                อัปโหลดไฟล์ข้อมูลต้นทาง
+                            </h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1.5">ไฟล์ All (ฐานข้อมูลหลัก)</label>
+                                    <div className="relative">
+                                        <input key={`file-all-${resetKey}`} type="file" onChange={(e) => handleFileUpload(e, 'ALL')} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200 file:font-medium file:cursor-pointer border border-slate-200 rounded-md bg-white"/>
+                                        {fileAll.name && <div className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-500 text-xs"><i className="fa-solid fa-check-circle"></i> อัปโหลดแล้ว</div>}
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 mt-1 truncate pr-2">{fileAll.name || 'รองรับ .csv, .xlsx'}</p>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1.5">ไฟล์ R05 (ไฟล์ที่ต้องการค้นหา, กรอง ALPR)</label>
+                                    <div className="relative">
+                                        <input key={`file-r05-${resetKey}`} type="file" onChange={(e) => handleFileUpload(e, 'R05')} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200 file:font-medium file:cursor-pointer border border-slate-200 rounded-md bg-white"/>
+                                        {fileR05.name && <div className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-500 text-xs"><i className="fa-solid fa-check-circle"></i> อัปโหลดแล้ว</div>}
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 mt-1 truncate pr-2">{fileR05.name || 'รองรับ .csv, .xlsx'}</p>
+                                </div>
                             </div>
                         </div>
-                    </section>
 
-                    {fileAll.headers.length > 0 && (
-                        <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                            <h2 className="text-lg font-semibold mb-4 text-slate-700">2. ตั้งค่าคอลัมน์สำหรับชนข้อมูล (Key Configuration)</h2>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                                <div>
-                                    <h3 className="font-medium text-indigo-700 mb-2">ไฟล์ All</h3>
-                                    <div className="space-y-2">
-                                        <select className="w-full border rounded-lg p-2" onChange={(e) => e.target.value && setKeyColsAll([...keyColsAll, e.target.value])}>
-                                            <option value="">+ เพิ่มคอลัมน์</option>
-                                            {fileAll.headers.map(h => <option key={h} value={h}>{h}</option>)}
+                        {fileAll.headers.length > 0 && fileR05.headers.length > 0 && (
+                            <div className="p-6 border-b border-slate-100">
+                                <h2 className="text-sm font-semibold text-slate-700 mb-4 flex items-center gap-2">
+                                    <span className="bg-slate-200 text-slate-600 w-6 h-6 rounded-full flex items-center justify-center text-xs">2</span> 
+                                    ตั้งค่าเงื่อนไขการค้นหา (Key Mapping)
+                                </h2>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                    <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                                        <label className="block text-xs font-medium text-slate-600 mb-2">คอลัมน์จากไฟล์ All</label>
+                                        <select 
+                                            className="w-full border border-slate-300 rounded-md p-2 text-sm focus:ring-1 focus:ring-brandYellow focus:border-brandYellow outline-none bg-white" 
+                                            onChange={(e) => e.target.value && setKeyColsAll([...keyColsAll, e.target.value])}
+                                            value=""
+                                        >
+                                            <option value="" disabled>-- เลือกคอลัมน์เพื่อเพิ่ม --</option>
+                                            {fileAll.headers.map((h, i) => <option key={i} value={h}>{h}</option>)}
                                         </select>
-                                        <div className="flex flex-wrap gap-2">
+                                        <div className="flex flex-wrap gap-2 mt-3 min-h-[32px]">
+                                            {keyColsAll.length === 0 && <span className="text-xs text-slate-400 italic">ยังไม่ได้เลือกคอลัมน์</span>}
                                             {keyColsAll.map((col, idx) => (
-                                                <span key={idx} className="bg-indigo-100 px-3 py-1 rounded-full text-xs flex items-center gap-2">
-                                                    {col} <button onClick={() => setKeyColsAll(keyColsAll.filter((_,i)=>i!==idx))} className="text-red-500 font-bold">×</button>
+                                                <span key={idx} className="bg-white border border-slate-300 shadow-sm px-2.5 py-1 rounded-md text-xs flex items-center gap-2 text-slate-700">
+                                                    {col} 
+                                                    <button onClick={() => setKeyColsAll(keyColsAll.filter((_,i)=>i!==idx))} className="text-slate-400 hover:text-red-500"><i className="fa-solid fa-xmark"></i></button>
                                                 </span>
                                             ))}
                                         </div>
                                     </div>
-                                </div>
-                                <div>
-                                    <h3 className="font-medium text-emerald-700 mb-2">ไฟล์ R05</h3>
-                                    <div className="space-y-2">
-                                        <select className="w-full border rounded-lg p-2" onChange={(e) => e.target.value && setKeyColsR05([...keyColsR05, e.target.value])}>
-                                            <option value="">+ เพิ่มคอลัมน์</option>
-                                            {fileR05.headers.map(h => <option key={h} value={h}>{h}</option>)}
+                                    
+                                    <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                                        <label className="block text-xs font-medium text-slate-600 mb-2">คอลัมน์จากไฟล์ R05</label>
+                                        <select 
+                                            className="w-full border border-slate-300 rounded-md p-2 text-sm focus:ring-1 focus:ring-brandYellow focus:border-brandYellow outline-none bg-white" 
+                                            onChange={(e) => e.target.value && setKeyColsR05([...keyColsR05, e.target.value])}
+                                            value=""
+                                        >
+                                            <option value="" disabled>-- เลือกคอลัมน์เพื่อเพิ่ม --</option>
+                                            {fileR05.headers.map((h, i) => <option key={i} value={h}>{h}</option>)}
                                         </select>
-                                        <div className="flex flex-wrap gap-2">
+                                        <div className="flex flex-wrap gap-2 mt-3 min-h-[32px]">
+                                            {keyColsR05.length === 0 && <span className="text-xs text-slate-400 italic">ยังไม่ได้เลือกคอลัมน์</span>}
                                             {keyColsR05.map((col, idx) => (
-                                                <span key={idx} className="bg-emerald-100 px-3 py-1 rounded-full text-xs flex items-center gap-2">
-                                                    {col} <button onClick={() => setKeyColsR05(keyColsR05.filter((_,i)=>i!==idx))} className="text-red-500 font-bold">×</button>
+                                                <span key={idx} className="bg-white border border-slate-300 shadow-sm px-2.5 py-1 rounded-md text-xs flex items-center gap-2 text-slate-700">
+                                                    {col} 
+                                                    <button onClick={() => setKeyColsR05(keyColsR05.filter((_,i)=>i!==idx))} className="text-slate-400 hover:text-red-500"><i className="fa-solid fa-xmark"></i></button>
                                                 </span>
                                             ))}
                                         </div>
                                     </div>
                                 </div>
                             </div>
-                            <button onClick={runMatching} className="mt-6 w-full bg-slate-900 text-white py-3 rounded-xl font-bold hover:bg-slate-800 transition">
-                                {isProcessing ? "กำลังดำเนินการ..." : "เริ่มทำการชนข้อมูล"}
+                        )}
+
+                        <div className="p-6 bg-slate-50/30 flex items-center gap-3">
+                            <button 
+                                onClick={runMatching}
+                                disabled={isProcessing || keyColsAll.length === 0 || keyColsR05.length === 0}
+                                className={`px-6 py-2.5 rounded-md font-medium text-sm transition-all flex items-center gap-2 ${
+                                    isProcessing || keyColsAll.length === 0 || keyColsR05.length === 0
+                                    ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                                    : 'bg-teal-600 hover:bg-teal-700 text-white shadow-sm'
+                                }`}
+                            >
+                                {isProcessing ? <><i className="fa-solid fa-circle-notch fa-spin"></i> กำลังประมวลผล...</> : 'ค้นหาข้อมูล'}
                             </button>
-                        </section>
-                    )}
+
+                            {results && (
+                                <button 
+                                    onClick={downloadResult}
+                                    className="px-6 py-2.5 rounded-md font-medium text-sm bg-amber-500 hover:bg-amber-600 text-white shadow-sm transition-all flex items-center gap-2"
+                                >
+                                    ส่งออก Excel
+                                </button>
+                            )}
+                        </div>
+                    </div>
 
                     {results && (
-                        <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 animate-fade-in">
-                            <h2 className="text-xl font-bold mb-4 text-slate-800"><i className="fa-solid fa-chart-pie mr-2 text-indigo-500"></i>3. แดชบอร์ดสรุปผลลัพธ์</h2>
-                            
-                            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-                                <div className="bg-blue-50 p-4 rounded-xl border border-blue-100 flex flex-col justify-center">
-                                    <p className="text-sm text-blue-600 font-semibold mb-1">ไฟล์ All (ตั้งต้น)</p>
-                                    <p className="text-3xl font-bold text-blue-900">{results.totalAll.toLocaleString()} <span className="text-sm font-normal text-blue-600">รายการ</span></p>
+                        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 animate-fade-in mt-6">
+                            <h3 className="text-base font-semibold text-slate-800 mb-4 border-b border-slate-100 pb-2">ผลลัพธ์การค้นหา</h3>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                <div className="border border-slate-100 rounded-lg p-4 bg-slate-50 text-center">
+                                    <p className="text-xs text-slate-500 mb-1">ข้อมูลตั้งต้น (All)</p>
+                                    <p className="text-2xl font-bold text-slate-700">{results.totalAll.toLocaleString()}</p>
                                 </div>
-                                <div className="bg-purple-50 p-4 rounded-xl border border-purple-100 flex flex-col justify-center">
-                                    <p className="text-sm text-purple-600 font-semibold mb-1">ไฟล์ R05 (เฉพาะ ALPR)</p>
-                                    <p className="text-3xl font-bold text-purple-900">{results.totalR05ALPR.toLocaleString()} <span className="text-sm font-normal text-purple-600">รายการ</span></p>
-                                    <p className="text-xs text-purple-500 mt-1">จากทั้งหมด {results.totalR05.toLocaleString()}</p>
+                                <div className="border border-slate-100 rounded-lg p-4 bg-slate-50 text-center">
+                                    <p className="text-xs text-slate-500 mb-1">เงื่อนไข R05 (ALPR)</p>
+                                    <p className="text-2xl font-bold text-slate-700">{results.totalR05ALPR.toLocaleString()}</p>
                                 </div>
-                                <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-100 flex flex-col justify-center">
-                                    <p className="text-sm text-emerald-600 font-semibold mb-1">พบข้อมูลตรงกัน (Matched)</p>
-                                    <p className="text-3xl font-bold text-emerald-900">{results.matchedCount.toLocaleString()} <span className="text-sm font-normal text-emerald-600">รายการ</span></p>
+                                <div className="border border-teal-100 rounded-lg p-4 bg-teal-50 text-center">
+                                    <p className="text-xs text-teal-600 mb-1 font-medium">พบข้อมูลตรงกัน</p>
+                                    <p className="text-2xl font-bold text-teal-700">{results.matchedCount.toLocaleString()}</p>
                                 </div>
-                                <div className="bg-red-50 p-4 rounded-xl border border-red-100 flex flex-col justify-center relative">
-                                    <p className="text-sm text-red-600 font-semibold mb-1">รายการคีย์ซ้ำ</p>
-                                    <p className="text-3xl font-bold text-red-900">{results.duplicateDetails.length.toLocaleString()} <span className="text-sm font-normal text-red-600">คีย์</span></p>
+                                <div className="border border-amber-100 rounded-lg p-4 bg-amber-50 text-center relative group">
+                                    <p className="text-xs text-amber-600 mb-1 font-medium">รายการคีย์ซ้ำ</p>
+                                    <p className="text-2xl font-bold text-amber-700">{results.duplicateDetails.length.toLocaleString()}</p>
                                     {results.duplicateDetails.length > 0 && (
-                                        <button onClick={() => setShowDuplicateModal(true)} className="mt-2 text-xs bg-red-500 text-white px-3 py-1.5 rounded-lg hover:bg-red-600 transition shadow-sm font-medium">
-                                            <i className="fa-solid fa-magnifying-glass mr-1"></i> ดูรายละเอียด
+                                        <button onClick={() => setShowDuplicateModal(true)} className="absolute inset-0 w-full h-full bg-amber-500/90 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-sm font-medium backdrop-blur-sm">
+                                            ดูรายละเอียด
                                         </button>
                                     )}
                                 </div>
                             </div>
-
-                            <button onClick={downloadResult} className="w-full bg-emerald-600 text-white px-6 py-4 rounded-xl font-bold hover:bg-emerald-700 transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-200">
-                                <i className="fa-solid fa-download text-xl"></i> ดาวน์โหลดไฟล์ผลลัพธ์ (.xlsx)
-                            </button>
-                        </section>
+                        </div>
                     )}
+                </div>
+            );
 
-                    {/* Modal แสดงรายละเอียดคีย์ซ้ำ */}
+            const renderHistoryView = () => (
+                <div className="animate-fade-in space-y-6">
+                    <div>
+                        <p className="text-brandYellow text-sm font-semibold mb-1">คิวงาน</p>
+                        <h1 className="text-2xl font-bold text-slate-800">รายงานของฉัน</h1>
+                        <p className="text-slate-500 text-sm mt-1">สถานะอัปเดตแบบเรียลไทม์ - ไฟล์ผลลัพธ์จัดเก็บบบน Google Drive Cloud และเก็บรักษาไว้เป็นเวลา 1 วัน</p>
+                    </div>
+
+                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left text-sm">
+                                <thead className="bg-slate-50 text-slate-500 font-medium border-b border-slate-200">
+                                    <tr>
+                                        <th className="p-4 w-16 text-center">เลขที่</th>
+                                        <th className="p-4">ประเภท</th>
+                                        <th className="p-4 min-w-[200px]">เงื่อนไขที่ใช้</th>
+                                        <th className="p-4">สร้างเมื่อ</th>
+                                        <th className="p-4 text-center">สถานะ</th>
+                                        <th className="p-4 text-center">ความคืบหน้า</th>
+                                        <th className="p-4 text-center">รายละเอียด</th>
+                                        <th className="p-4 text-center">ใช้งานได้อีก</th>
+                                        <th className="p-4 text-center">จัดการ</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {historyItems.map((row) => (
+                                        <tr key={row.id} className="hover:bg-slate-50/50 transition">
+                                            <td className="p-4 text-center text-slate-500">{row.id}</td>
+                                            <td className="p-4 text-slate-700 font-medium">{row.type}</td>
+                                            <td className="p-4">
+                                                <div className="text-slate-700 text-xs bg-slate-100 px-2.5 py-1 rounded-md inline-block">{row.condition}</div>
+                                            </td>
+                                            <td className="p-4 text-slate-500 text-xs">{row.date}</td>
+                                            <td className="p-4 text-center">
+                                                {row.status === 'done' && (
+                                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700 border border-emerald-200">
+                                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> เสร็จแล้ว
+                                                    </span>
+                                                )}
+                                                {row.status === 'processing' && (
+                                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-700 border border-amber-200">
+                                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span> กำลังคำนวน
+                                                    </span>
+                                                )}
+                                                {row.status === 'error' && (
+                                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-rose-100 text-rose-700 border border-rose-200">
+                                                        <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span> เกิดข้อผิดพลาด
+                                                    </span>
+                                                )}
+                                                {row.status === 'expired' && (
+                                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200">
+                                                        <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span> หมดอายุ
+                                                    </span>
+                                                )}
+                                            </td>
+                                            <td className="p-4 text-center">
+                                                <div className="w-24 bg-slate-200 rounded-full h-2 mx-auto overflow-hidden">
+                                                    <div 
+                                                        className={`h-2 rounded-full ${
+                                                            row.status === 'processing' ? 'bg-amber-500 animate-pulse' :
+                                                            row.status === 'error' ? 'bg-rose-500' :
+                                                            'bg-emerald-500'
+                                                        }`} 
+                                                        style={{ width: `${row.progress}%` }}
+                                                    ></div>
+                                                </div>
+                                            </td>
+                                            <td className="p-4 text-center text-slate-600 text-xs font-semibold">
+                                                {row.records.toLocaleString()} รายการ
+                                            </td>
+                                            <td className="p-4 text-center text-xs font-medium">
+                                                {row.status === 'done' ? (
+                                                    <span className="text-teal-600">{formatTimeRemaining(row.date)}</span>
+                                                ) : row.status === 'processing' ? (
+                                                    <span className="text-amber-600">กำลังประมวลผล...</span>
+                                                ) : (
+                                                    <span className="text-rose-500">-</span>
+                                                )}
+                                            </td>
+                                            <td className="p-4 text-center">
+                                                <div className="flex flex-col gap-1.5 items-center">
+                                                    <button 
+                                                        onClick={() => handleDownloadHistory(row)}
+                                                        disabled={row.status === 'expired' || row.status === 'processing' || row.status === 'error'}
+                                                        className={`px-3 py-1 rounded text-xs font-medium transition shadow-sm ${
+                                                            row.status === 'expired' || row.status === 'processing' || row.status === 'error'
+                                                            ? 'bg-slate-200 text-slate-400 cursor-not-allowed' 
+                                                            : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
+                                                        }`}
+                                                    >
+                                                        ดาวน์โหลด
+                                                    </button>
+                                                    <button 
+                                                        onClick={() => handleDeleteHistory(row.id)}
+                                                        className="px-3 py-1 rounded text-xs font-medium bg-rose-50 border border-rose-200 text-rose-600 hover:bg-rose-100 transition shadow-sm"
+                                                    >
+                                                        ลบ
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="flex h-screen bg-bgLight">
+                    <div className="w-64 bg-sidebar text-slate-300 flex flex-col shadow-2xl z-20 shrink-0">
+                        <div className="h-20 px-6 flex items-center gap-3 border-b border-slate-700/50 select-none">
+                            <div className="w-9 h-9 bg-brandYellow text-sidebar rounded-md flex items-center justify-center font-bold text-xl shadow-lg shadow-brandYellow/20 transform rotate-3 hover:rotate-0 transition-transform">
+                                <i className="fa-solid fa-layer-group"></i>
+                            </div>
+                            <div>
+                                <div className="font-bold text-white tracking-wide leading-tight">SPF</div>
+                                <div className="text-xs text-slate-400">รายงาน / ชนข้อมูล</div>
+                            </div>
+                        </div>
+                        
+                        <div className="flex-1 py-6 flex flex-col gap-1 overflow-y-auto custom-scrollbar">
+                            <NavItem icon="fa-house" label="หน้าหลัก" id="home" />
+                            <NavItem icon="fa-file-lines" label="ออกรายงาน (ชนข้อมูล)" id="match" />
+                            <NavItem icon="fa-bars-staggered" label="รายงานของฉัน" id="history" />
+                        </div>
+                        
+                        <div className="p-4 border-t border-slate-700/50 bg-[#11141c]">
+                            <div className="bg-[#1b212f] rounded-lg p-3 flex items-center justify-between border border-slate-700/50">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-8 h-8 bg-brandYellow text-sidebar rounded flex items-center justify-center font-bold text-sm">
+                                        O
+                                    </div>
+                                    <div className="text-xs">
+                                        <div className="text-slate-400">ผู้ใช้งาน</div>
+                                    </div>
+                                </div>
+                                <button className="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 rounded transition">
+                                    <i className="fa-solid fa-arrow-right-from-bracket"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="flex-1 flex flex-col overflow-hidden relative">
+                        <div className="flex-1 overflow-y-auto custom-scrollbar p-8 md:p-10">
+                            {activeMenu === 'home' && renderHomeView()}
+                            {activeMenu === 'match' && renderMatchView()}
+                            {activeMenu === 'history' && renderHistoryView()}
+                        </div>
+                    </div>
+
                     {showDuplicateModal && results && (
-                        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-50 p-4 backdrop-blur-sm transition-opacity">
-                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden animate-slide-up">
-                                <div className="p-5 border-b flex justify-between items-center bg-slate-50">
-                                    <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                                        <span className="bg-amber-100 text-amber-600 w-8 h-8 rounded-full flex items-center justify-center mr-3">
-                                            <i className="fa-solid fa-triangle-exclamation"></i>
-                                        </span>
-                                        รายละเอียดคีย์ที่พบมากกว่า 1 ครั้ง
+                        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
+                            <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden animate-fade-in">
+                                <div className="p-4 border-b flex justify-between items-center bg-slate-50">
+                                    <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                                        <i className="fa-solid fa-triangle-exclamation text-amber-500"></i> รายละเอียดคีย์ที่พบซ้ำ
                                     </h3>
-                                    <button onClick={() => setShowDuplicateModal(false)} className="text-slate-400 hover:text-red-500 transition text-xl w-8 h-8 flex items-center justify-center rounded-full hover:bg-red-50">
+                                    <button onClick={() => setShowDuplicateModal(false)} className="text-slate-400 hover:text-slate-700 text-lg w-8 h-8 flex items-center justify-center rounded-md hover:bg-slate-200 transition">
                                         <i className="fa-solid fa-xmark"></i>
                                     </button>
                                 </div>
-                                <div className="p-6 overflow-auto flex-1 bg-slate-50/50">
-                                    <div className="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-xl mb-5 text-sm flex gap-3 shadow-sm">
-                                        <i className="fa-solid fa-circle-info mt-0.5 text-amber-500"></i>
-                                        <p>มีคีย์ (Key) จากไฟล์ R05 ที่นำไปค้นหาในไฟล์ All แล้วพบว่า <strong>มีข้อมูลตรงกันมากกว่า 1 รายการต่อคีย์</strong> ส่งผลให้จำนวนแถวผลลัพธ์รวม (Matched) มีมากกว่าจำนวนแถวตั้งต้น (R05)</p>
+                                <div className="p-6 overflow-auto flex-1 custom-scrollbar">
+                                    <div className="bg-amber-50 border border-amber-200 text-amber-800 p-3 rounded-lg mb-4 text-sm">
+                                        พบข้อมูลคีย์จากไฟล์ R05 ที่ไปตรงกับไฟล์ All มากกว่า 1 รายการต่อคีย์
                                     </div>
-                                    <div className="border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-                                        <table className="w-full text-left border-collapse bg-white">
-                                            <thead>
-                                                <tr className="bg-slate-100/80 text-slate-600 text-sm">
-                                                    <th className="p-4 border-b font-semibold">คีย์ที่ใช้ชน (Key)</th>
-                                                    <th className="p-4 border-b font-semibold w-32 text-center">จำนวนที่พบ</th>
+                                    <table className="w-full text-left border-collapse text-sm">
+                                        <thead>
+                                            <tr className="bg-slate-100 text-slate-600">
+                                                <th className="p-3 border-b font-medium rounded-tl-lg">คีย์ที่ใช้ชน (Key)</th>
+                                                <th className="p-3 border-b font-medium w-32 text-center rounded-tr-lg">จำนวนที่พบ</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {results.duplicateDetails.map((dup, i) => (
+                                                <tr key={i} className="hover:bg-slate-50">
+                                                    <td className="p-3 font-mono text-slate-600 text-xs">{dup.key}</td>
+                                                    <td className="p-3 text-center">
+                                                        <span className="bg-rose-100 text-rose-700 px-2 py-0.5 rounded text-xs font-semibold">
+                                                            {dup.count}
+                                                        </span>
+                                                    </td>
                                                 </tr>
-                                            </thead>
-                                            <tbody>
-                                                {results.duplicateDetails.map((dup, i) => (
-                                                    <tr key={i} className="border-b last:border-0 hover:bg-slate-50 transition">
-                                                        <td className="p-4 text-sm font-mono text-slate-700 bg-slate-50/50">{dup.key}</td>
-                                                        <td className="p-4 text-center">
-                                                            <span className="bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm font-bold border border-red-200">
-                                                                {dup.count}
-                                                            </span>
-                                                        </td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
+                                            ))}
+                                        </tbody>
+                                    </table>
                                 </div>
                             </div>
                         </div>
