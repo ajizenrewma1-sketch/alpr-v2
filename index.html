@@ -155,33 +155,63 @@ useEffect(() => {
                 return newWb;
             };
 
-            const uploadToGoogleDrive = async (fileName, matchedRows) => {
-                const GAS_URL = "https://script.google.com/macros/s/AKfycbxfTQgd4er49wl7qn7CpRu5y1ccSe6ooWjTDzkUinl7l4HWPOXpUn3xoENJAepeb5U6/exec";
+            const uploadToGoogleDrive = (fileName, matchedRows, onProgress) => {
+    const GAS_URL = "https://script.google.com/macros/s/AKfycbxfTQgd4er49wl7qn7CpRu5y1ccSe6ooWjTDzkUinl7l4HWPOXpUn3xoENJAepeb5U6/exec";
 
-                try {
-                    // ใช้ฟังก์ชันสร้าง Workbook ตัวเดียวกัน เพื่อรักษาสูตรและรูปภาพไว้ ไม่ให้กลายเป็น 0 บนคลาวด์
-                    const wb = buildMatchedWorkbook(matchedRows);
-                    if (!wb) return "error_file_id";
+    return new Promise((resolve) => {
+        try {
+            // ใช้ฟังก์ชันสร้าง Workbook ตัวเดียวกัน เพื่อรักษาสูตรและรูปภาพไว้ ไม่ให้กลายเป็น 0 บนคลาวด์
+            const wb = buildMatchedWorkbook(matchedRows);
+            if (!wb) {
+                resolve("error_file_id");
+                return;
+            }
 
-                    const base64Data = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+            const base64Data = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
 
-                    const payload = {
-                        filename: fileName || "M-Flow_Report.xlsx",
-                        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        base64Data: base64Data
-                    };
+            const payload = {
+                filename: fileName || "M-Flow_Report.xlsx",
+                mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                base64Data: base64Data
+            };
 
-                    const response = await fetch(GAS_URL, {
-                        method: "POST",
-                        body: JSON.stringify(payload)
-                    });
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', GAS_URL, true);
+            xhr.setRequestHeader('Content-Type', 'text/plain;charset=utf-8');
 
-                    const result = await response.json();
-                    return result.status === "success" ? result.fileId : "error_file_id";
-                } catch (error) {
-                    return "error_file_id";
+            // ดักจับเปอร์เซ็นต์การอัปโหลดไฟล์ขึ้น Google Drive แบบเรียลไทม์ (ช่วง 50% - 100%)
+            xhr.upload.onprogress = (event) => {
+                if (event.lengthComputable && onProgress) {
+                    const percentUploaded = Math.round((event.loaded / event.total) * 50);
+                    onProgress(50 + percentUploaded);
                 }
             };
+
+            xhr.onload = () => {
+                if (xhr.status === 200) {
+                    try {
+                        const result = JSON.parse(xhr.responseText);
+                        resolve(result.status === "success" ? result.fileId : "error_file_id");
+                    } catch (e) {
+                        resolve("error_file_id");
+                    }
+                } else {
+                    resolve("error_file_id");
+                }
+            };
+
+            xhr.onerror = () => {
+                resolve("error_file_id");
+            };
+
+            xhr.send(JSON.stringify(payload));
+
+        } catch (error) {
+            console.error("Upload error:", error);
+            resolve("error_file_id");
+        }
+    });
+};
 
             const deleteFileFromGoogleDrive = async (fileId) => {
                 if (!fileId) return;
@@ -339,96 +369,99 @@ useEffect(() => {
         condition: 'All + R05 (ALPR)',
         date: nowStr,
         status: 'processing',
-        progress: 50,
+        progress: 10,
         records: 0,
         driveFileId: ''
     };
 
-    // อัปเดต State ฝั่งหน้าเว็บ
     setHistoryItems(prev => [initialHistoryItem, ...prev]);
 
-    // [เพิ่มใหม่] บันทึกประวัติสถานะ 'processing' ลง Google Sheets ทันที
+    // บันทึกสถานะเริ่มต้นลง Cloud
     try {
         await fetch(GAS_URL, {
             method: "POST",
             body: JSON.stringify({ action: "saveHistory", ...initialHistoryItem })
         });
     } catch (err) {
-        console.error("Failed to save initial history to cloud:", err);
+        console.error("Failed to save initial history:", err);
     }
 
     setTimeout(async () => {
-        const filteredR05 = fileR05.rows.filter(r => String(r["ประเภทระบบ"]) === "ALPR");
-        const mapR05 = new Map();
-        filteredR05.forEach(row => {
-            const key = generateKey(row, keyColsR05, false);
-            mapR05.set(key, true);
-        });
+        try {
+            // อัปเดตสถานะกำลังคำนวณ (30%)
+            setHistoryItems(prev => prev.map(item => item.id === newHistoryId ? { ...item, progress: 30 } : item));
 
-        const matchedRows = [];
-        const keyCounts = {};
+            const filteredR05 = fileR05.rows.filter(r => String(r["ประเภทระบบ"]) === "ALPR");
+            const mapR05 = new Map();
+            filteredR05.forEach(row => {
+                const key = generateKey(row, keyColsR05, false);
+                mapR05.set(key, true);
+            });
 
-        fileAll.rows.forEach(row => {
-            const key = generateKey(row, keyColsAll, true);
-            if (mapR05.has(key)) {
-                matchedRows.push(row);
-                keyCounts[key] = (keyCounts[key] || 0) + 1;
-            }
-        });
+            // อัปเดตสถานะคำนวณใกล้เสร็จ (50%)
+            setHistoryItems(prev => prev.map(item => item.id === newHistoryId ? { ...item, progress: 50 } : item));
 
-        const duplicateDetails = Object.keys(keyCounts)
-            .filter(k => keyCounts[k] > 1)
-            .map(k => ({ key: k, count: keyCounts[k] }))
-            .sort((a, b) => b.count - a.count);
+            const matchedRows = [];
+            const keyCounts = {};
 
-        setResults({
-            totalAll: fileAll.rows.length,
-            totalR05: fileR05.rows.length,
-            totalR05ALPR: filteredR05.length,
-            matchedCount: matchedRows.length,
-            duplicateDetails: duplicateDetails,
-            data: matchedRows 
-        });
-        setIsProcessing(false);
-
-        const isNoMatch = matchedRows.length === 0;
-
-        if (isNoMatch) {
-            setHistoryItems(prev => prev.map(item => {
-                if (item.id === newHistoryId) {
-                    return { ...item, status: 'error', progress: 100, records: 0 };
+            fileAll.rows.forEach(row => {
+                const key = generateKey(row, keyColsAll, true);
+                if (mapR05.has(key)) {
+                    matchedRows.push(row);
+                    keyCounts[key] = (keyCounts[key] || 0) + 1;
                 }
-                return item;
-            }));
+            });
 
-            // [เพิ่มใหม่] อัปเดตสถานะ error ลง Google Sheets เมื่อไม่พบข้อมูลที่ตรงกัน
+            const duplicateDetails = Object.keys(keyCounts)
+                .filter(k => keyCounts[k] > 1)
+                .map(k => ({ key: k, count: keyCounts[k] }))
+                .sort((a, b) => b.count - a.count);
+
+            setResults({
+                totalAll: fileAll.rows.length,
+                totalR05: fileR05.rows.length,
+                totalR05ALPR: filteredR05.length,
+                matchedCount: matchedRows.length,
+                duplicateDetails: duplicateDetails,
+                data: matchedRows 
+            });
+            setIsProcessing(false);
+
+            if (matchedRows.length === 0) {
+                setHistoryItems(prev => prev.map(item => item.id === newHistoryId ? { ...item, status: 'error', progress: 100, records: 0 } : item));
+                await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=error&records=0`);
+            } else {
+                // เรียกใช้อัปโหลด พร้อมส่ง callback (onProgress) เพื่อให้หลอดเปอร์เซ็นต์วิ่งตามจริง (50% - 100%)
+                const fileId = await uploadToGoogleDrive("Matched_Result.xlsx", matchedRows, (currentProgress) => {
+                    setHistoryItems(prev => prev.map(item => item.id === newHistoryId ? {
+                        ...item,
+                        progress: currentProgress,
+                        condition: `All + R05 (กำลังอัปโหลด ${currentProgress}%)`
+                    } : item));
+                });
+                
+                // อัปเดตสถานะเมื่อเสร็จสมบูรณ์ 100%
+                setHistoryItems(prev => prev.map(item => item.id === newHistoryId ? {
+                    ...item,
+                    status: 'done',
+                    progress: 100,
+                    condition: 'All + R05 (ALPR)',
+                    records: matchedRows.length,
+                    driveFileId: fileId
+                } : item));
+
+                await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=done&records=${matchedRows.length}&driveFileId=${fileId}`);
+            }
+        } catch (error) {
+            console.error("Processing error:", error);
+            setIsProcessing(false);
+            setHistoryItems(prev => prev.map(item => item.id === newHistoryId ? { ...item, status: 'error', progress: 100 } : item));
+            
             try {
                 await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=error&records=0`);
-            } catch (err) {
-                console.error("Failed to update error history on cloud:", err);
-            }
-        } else {
-            try {
-                const fileId = await uploadToGoogleDrive("Matched_Result.xlsx", matchedRows);
-                
-                setHistoryItems(prev => prev.map(item => {
-                    if (item.id === newHistoryId) {
-                        return {
-                            ...item,
-                            status: 'done',
-                            progress: 100,
-                            records: matchedRows.length,
-                            driveFileId: fileId
-                        };
-                    }
-                    return item;
-                }));
-
-                // [เพิ่มใหม่] อัปเดตสถานะ done, จำนวนเรคอร์ด และ Drive File ID ลง Google Sheets
-                await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=done&records=${matchedRows.length}&driveFileId=${fileId}`);
-            } catch (err) {
-                console.error("Failed to upload file or update history on cloud:", err);
-            }
+            } catch (e) {}
+            
+            alert("เกิดข้อผิดพลาดในการประมวลผลหรืออัปโหลดไฟล์: " + error.message);
         }
     }, 500);
 };
