@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DataMatch Pro - ระบบชนข้อมูลอัจฉริยะ</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.21.4/babel.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <style>
+        body { font-family: 'Prompt', sans-serif; background-color: #f1f5f9; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState } = React;
+
+        function App() {
+            const [fileAll, setFileAll] = useState({ name: '', headers: [], rows: [], originalWs: null });
+            const [fileR05, setFileR05] = useState({ name: '', headers: [], rows: [], originalWs: null });
+            
+            const [keyColsAll, setKeyColsAll] = useState([]);
+            const [keyColsR05, setKeyColsR05] = useState([]);
+            
+            const [results, setResults] = useState(null);
+            const [isProcessing, setIsProcessing] = useState(false);
+            const [showDuplicateModal, setShowDuplicateModal] = useState(false);
+
+            const handleFileUpload = (e, type) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const fileExtension = file.name.split('.').pop().toLowerCase();
+
+                if (fileExtension === 'csv') {
+                    Papa.parse(file, {
+                        header: true,
+                        skipEmptyLines: true,
+                        complete: (results) => {
+                            const data = { name: file.name, headers: results.meta.fields, rows: results.data, originalWs: null };
+                            if (type === 'ALL') setFileAll(data);
+                            else setFileR05(data);
+                        }
+                    });
+                } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+                    const reader = new FileReader();
+                    reader.onload = (evt) => {
+                        const data = new Uint8Array(evt.target.result);
+                        // อ่านไฟล์แบบ cellFormula: true เพื่อให้มันเก็บค่าสูตร (=IMAGE) ไว้ไม่ลบหาย
+                        const workbook = XLSX.read(data, { type: 'array', cellFormula: true });
+                        const firstSheetName = workbook.SheetNames[0];
+                        const worksheet = workbook.Sheets[firstSheetName];
+                        
+                        // ใช้การอ่านแบบ Array of Arrays (header: 1) เพื่อล็อค Index ของแถวให้ตรงกับต้นฉบับ 100%
+                        const aoa = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "" });
+                        
+                        const rawHeaders = aoa.length > 0 ? aoa[0] : [];
+                        const headers = rawHeaders.map((h, i) => (h === undefined || h === "") ? `__EMPTY_${i}` : h);
+                        
+                        const rows = [];
+                        for (let i = 1; i < aoa.length; i++) {
+                            const rowData = aoa[i];
+                            if (!rowData) continue; // ข้ามแถวว่าง
+                            
+                            const rowObj = {};
+                            let isEmpty = true;
+                            headers.forEach((h, colIdx) => {
+                                rowObj[h] = rowData[colIdx] !== undefined ? rowData[colIdx] : "";
+                                if (rowObj[h] !== "") isEmpty = false;
+                            });
+                            
+                            if (!isEmpty) {
+                                // จุดสำคัญที่สุด: เก็บหมายเลขบรรทัดเดิมจากใน Excel เอาไว้!
+                                rowObj._originalRowIdx = i;
+                                rows.push(rowObj);
+                            }
+                        }
+
+                        const processedData = {
+                            name: file.name,
+                            headers: headers,
+                            rows: rows,
+                            originalWs: worksheet // เก็บชีท Excel ต้นฉบับที่มีสูตรไว้ใช้งานตอน Save
+                        };
+
+                        if (type === 'ALL') setFileAll(processedData);
+                        else setFileR05(processedData);
+                    };
+                    reader.readAsArrayBuffer(file);
+                } else {
+                    alert("รองรับเฉพาะไฟล์ .csv หรือ .xlsx / .xls เท่านั้น");
+                }
+            };
+
+            const processValue = (val, colName, isAllFile) => {
+                let s = String(val || '').trim();
+                
+                if (isAllFile && colName === "เวลา") {
+                    s = s.replace(/\.\d{3}$/, '');
+                }
+
+                if (colName === "เวลา") {
+                    const parts = s.split(':');
+                    if (parts.length > 0 && parts[0].length === 1) {
+                        parts[0] = '0' + parts[0];
+                        s = parts.join(':');
+                    }
+                }
+                return s;
+            };
+
+            const generateKey = (row, cols, isAllFile) => {
+                return cols.map(col => processValue(row[col], col, isAllFile)).join('|');
+            };
+
+            const runMatching = () => {
+                if (keyColsAll.length === 0 || keyColsR05.length === 0) {
+                    alert("กรุณาเลือกคอลัมน์สำหรับสร้าง Key ให้ครบถ้วน");
+                    return;
+                }
+
+                setIsProcessing(true);
+
+                const filteredR05 = fileR05.rows.filter(r => String(r["ประเภทระบบ"]) === "ALPR");
+
+                const mapR05 = new Map();
+                filteredR05.forEach(row => {
+                    const key = generateKey(row, keyColsR05, false);
+                    mapR05.set(key, true);
+                });
+
+                // กรองเฉพาะแถวที่เจอ และนับจำนวนคีย์เพื่อหาข้อมูลซ้ำ
+                const matchedRows = [];
+                const keyCounts = {};
+
+                fileAll.rows.forEach(row => {
+                    const key = generateKey(row, keyColsAll, true);
+                    if (mapR05.has(key)) {
+                        matchedRows.push(row);
+                        keyCounts[key] = (keyCounts[key] || 0) + 1;
+                    }
+                });
+
+                // หาคีย์ที่มีการซ้ำ (พบมากกว่า 1 ครั้งในไฟล์ ALL)
+                const duplicateDetails = Object.keys(keyCounts)
+                    .filter(k => keyCounts[k] > 1)
+                    .map(k => ({ key: k, count: keyCounts[k] }))
+                    .sort((a, b) => b.count - a.count); // เรียงจากซ้ำมากไปน้อย
+
+                setResults({
+                    totalAll: fileAll.rows.length,
+                    totalR05: fileR05.rows.length,
+                    totalR05ALPR: filteredR05.length,
+                    matchedCount: matchedRows.length,
+                    duplicateDetails: duplicateDetails,
+                    data: matchedRows 
+                });
+                setIsProcessing(false);
+            };
+
+            const downloadResult = () => {
+                if (!results || results.data.length === 0) return;
+                
+                if (fileAll.originalWs) {
+                    // หากไฟล์เป็น Excel (มี originalWs) เราจะใช้วิธี 'คัดลอกเซลล์ดิบ' (Raw Cells)
+                    // เพื่อให้สูตรเช่น =IMAGE(...) ถูกส่งผ่านไปตรงๆ แบบไม่โดนแปลงเป็น 0
+                    const originalWs = fileAll.originalWs;
+                    const range = XLSX.utils.decode_range(originalWs['!ref']);
+                    const newWs = {};
+                    let newRowIdx = 0;
+
+                    // ฟังก์ชันคัดลอกแถวโดยก๊อปปี้ Object เซลล์ตรงๆ จาก SheetJS
+                    const copyRow = (sourceRowIdx, destRowIdx) => {
+                        for (let C = range.s.c; C <= range.e.c; C++) {
+                            const cellAddress = XLSX.utils.encode_cell({ r: sourceRowIdx, c: C });
+                            const cell = originalWs[cellAddress];
+                            if (cell) {
+                                const newCellAddress = XLSX.utils.encode_cell({ r: destRowIdx, c: C });
+                                // สำเนาเซลล์เพื่อรักษาประเภทของมันไว้ รวมถึงค่า f (formula)
+                                newWs[newCellAddress] = JSON.parse(JSON.stringify(cell));
+                            }
+                        }
+                    };
+
+                    // 1. คัดลอกแถว Header (แถวที่ 0)
+                    copyRow(0, newRowIdx++);
+
+                    // 2. คัดลอกเฉพาะแถวที่ผ่านการ Match เจอ โดยอ้างอิงจากเลขแถวเดิม (_originalRowIdx)
+                    results.data.forEach(row => {
+                        if (row._originalRowIdx !== undefined) {
+                            copyRow(row._originalRowIdx, newRowIdx++);
+                        }
+                    });
+
+                    // สร้างขอบเขตพื้นที่ให้ Sheet ใหม่
+                    newWs['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: newRowIdx - 1, c: range.e.c } });
+
+                    const newWb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(newWb, newWs, "Matched_Result");
+                    XLSX.writeFile(newWb, "Matched_Result.xlsx");
+                } else {
+                    // กรณีเป็นไฟล์ CSV (ไม่มีสูตรแต่แรก)
+                    const exportData = results.data.map(row => {
+                        const newRow = { ...row };
+                        delete newRow._originalRowIdx; // เอาฟิลด์ระบบออก
+                        return newRow;
+                    });
+                    const worksheet = XLSX.utils.json_to_sheet(exportData);
+                    const workbook = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(workbook, worksheet, "Matched_Result");
+                    XLSX.writeFile(workbook, "Matched_Result.xlsx");
+                }
+            };
+
+            return (
+                <div className="max-w-6xl mx-auto p-6 space-y-8">
+                    <header className="bg-indigo-900 text-white p-6 rounded-2xl shadow-xl">
+                        <h1 className="text-2xl font-bold">DataMatch Pro - ระบบชนข้อมูล</h1>
+                        <p className="opacity-80">อัปโหลดไฟล์, เลือกคอลัมน์คีย์, และดำเนินการเปรียบเทียบข้อมูล</p>
+                    </header>
+
+                    <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                        <h2 className="text-lg font-semibold mb-4 text-slate-700">1. อัปโหลดไฟล์</h2>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                                <label className="block text-sm font-medium mb-2">ไฟล์ All</label>
+                                <input type="file" onChange={(e) => handleFileUpload(e, 'ALL')} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"/>
+                                <p className="text-xs text-slate-400 mt-1">{fileAll.name}</p>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium mb-2">ไฟล์ R05</label>
+                                <input type="file" onChange={(e) => handleFileUpload(e, 'R05')} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100"/>
+                                <p className="text-xs text-slate-400 mt-1">{fileR05.name}</p>
+                            </div>
+                        </div>
+                    </section>
+
+                    {fileAll.headers.length > 0 && (
+                        <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                            <h2 className="text-lg font-semibold mb-4 text-slate-700">2. ตั้งค่าคอลัมน์สำหรับชนข้อมูล (Key Configuration)</h2>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                <div>
+                                    <h3 className="font-medium text-indigo-700 mb-2">ไฟล์ All</h3>
+                                    <div className="space-y-2">
+                                        <select className="w-full border rounded-lg p-2" onChange={(e) => e.target.value && setKeyColsAll([...keyColsAll, e.target.value])}>
+                                            <option value="">+ เพิ่มคอลัมน์</option>
+                                            {fileAll.headers.map(h => <option key={h} value={h}>{h}</option>)}
+                                        </select>
+                                        <div className="flex flex-wrap gap-2">
+                                            {keyColsAll.map((col, idx) => (
+                                                <span key={idx} className="bg-indigo-100 px-3 py-1 rounded-full text-xs flex items-center gap-2">
+                                                    {col} <button onClick={() => setKeyColsAll(keyColsAll.filter((_,i)=>i!==idx))} className="text-red-500 font-bold">×</button>
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <h3 className="font-medium text-emerald-700 mb-2">ไฟล์ R05</h3>
+                                    <div className="space-y-2">
+                                        <select className="w-full border rounded-lg p-2" onChange={(e) => e.target.value && setKeyColsR05([...keyColsR05, e.target.value])}>
+                                            <option value="">+ เพิ่มคอลัมน์</option>
+                                            {fileR05.headers.map(h => <option key={h} value={h}>{h}</option>)}
+                                        </select>
+                                        <div className="flex flex-wrap gap-2">
+                                            {keyColsR05.map((col, idx) => (
+                                                <span key={idx} className="bg-emerald-100 px-3 py-1 rounded-full text-xs flex items-center gap-2">
+                                                    {col} <button onClick={() => setKeyColsR05(keyColsR05.filter((_,i)=>i!==idx))} className="text-red-500 font-bold">×</button>
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <button onClick={runMatching} className="mt-6 w-full bg-slate-900 text-white py-3 rounded-xl font-bold hover:bg-slate-800 transition">
+                                {isProcessing ? "กำลังดำเนินการ..." : "เริ่มทำการชนข้อมูล"}
+                            </button>
+                        </section>
+                    )}
+
+                    {results && (
+                        <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 animate-fade-in">
+                            <h2 className="text-xl font-bold mb-4 text-slate-800"><i className="fa-solid fa-chart-pie mr-2 text-indigo-500"></i>3. แดชบอร์ดสรุปผลลัพธ์</h2>
+                            
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                                <div className="bg-blue-50 p-4 rounded-xl border border-blue-100 flex flex-col justify-center">
+                                    <p className="text-sm text-blue-600 font-semibold mb-1">ไฟล์ All (ตั้งต้น)</p>
+                                    <p className="text-3xl font-bold text-blue-900">{results.totalAll.toLocaleString()} <span className="text-sm font-normal text-blue-600">รายการ</span></p>
+                                </div>
+                                <div className="bg-purple-50 p-4 rounded-xl border border-purple-100 flex flex-col justify-center">
+                                    <p className="text-sm text-purple-600 font-semibold mb-1">ไฟล์ R05 (เฉพาะ ALPR)</p>
+                                    <p className="text-3xl font-bold text-purple-900">{results.totalR05ALPR.toLocaleString()} <span className="text-sm font-normal text-purple-600">รายการ</span></p>
+                                    <p className="text-xs text-purple-500 mt-1">จากทั้งหมด {results.totalR05.toLocaleString()}</p>
+                                </div>
+                                <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-100 flex flex-col justify-center">
+                                    <p className="text-sm text-emerald-600 font-semibold mb-1">พบข้อมูลตรงกัน (Matched)</p>
+                                    <p className="text-3xl font-bold text-emerald-900">{results.matchedCount.toLocaleString()} <span className="text-sm font-normal text-emerald-600">รายการ</span></p>
+                                </div>
+                                <div className="bg-red-50 p-4 rounded-xl border border-red-100 flex flex-col justify-center relative">
+                                    <p className="text-sm text-red-600 font-semibold mb-1">รายการคีย์ซ้ำ</p>
+                                    <p className="text-3xl font-bold text-red-900">{results.duplicateDetails.length.toLocaleString()} <span className="text-sm font-normal text-red-600">คีย์</span></p>
+                                    {results.duplicateDetails.length > 0 && (
+                                        <button onClick={() => setShowDuplicateModal(true)} className="mt-2 text-xs bg-red-500 text-white px-3 py-1.5 rounded-lg hover:bg-red-600 transition shadow-sm font-medium">
+                                            <i className="fa-solid fa-magnifying-glass mr-1"></i> ดูรายละเอียด
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+
+                            <button onClick={downloadResult} className="w-full bg-emerald-600 text-white px-6 py-4 rounded-xl font-bold hover:bg-emerald-700 transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-200">
+                                <i className="fa-solid fa-download text-xl"></i> ดาวน์โหลดไฟล์ผลลัพธ์ (.xlsx)
+                            </button>
+                        </section>
+                    )}
+
+                    {/* Modal แสดงรายละเอียดคีย์ซ้ำ */}
+                    {showDuplicateModal && results && (
+                        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-50 p-4 backdrop-blur-sm transition-opacity">
+                            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden animate-slide-up">
+                                <div className="p-5 border-b flex justify-between items-center bg-slate-50">
+                                    <h3 className="text-lg font-bold text-slate-800 flex items-center">
+                                        <span className="bg-amber-100 text-amber-600 w-8 h-8 rounded-full flex items-center justify-center mr-3">
+                                            <i className="fa-solid fa-triangle-exclamation"></i>
+                                        </span>
+                                        รายละเอียดคีย์ที่พบมากกว่า 1 ครั้ง
+                                    </h3>
+                                    <button onClick={() => setShowDuplicateModal(false)} className="text-slate-400 hover:text-red-500 transition text-xl w-8 h-8 flex items-center justify-center rounded-full hover:bg-red-50">
+                                        <i className="fa-solid fa-xmark"></i>
+                                    </button>
+                                </div>
+                                <div className="p-6 overflow-auto flex-1 bg-slate-50/50">
+                                    <div className="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-xl mb-5 text-sm flex gap-3 shadow-sm">
+                                        <i className="fa-solid fa-circle-info mt-0.5 text-amber-500"></i>
+                                        <p>มีคีย์ (Key) จากไฟล์ R05 ที่นำไปค้นหาในไฟล์ All แล้วพบว่า <strong>มีข้อมูลตรงกันมากกว่า 1 รายการต่อคีย์</strong> ส่งผลให้จำนวนแถวผลลัพธ์รวม (Matched) มีมากกว่าจำนวนแถวตั้งต้น (R05)</p>
+                                    </div>
+                                    <div className="border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                                        <table className="w-full text-left border-collapse bg-white">
+                                            <thead>
+                                                <tr className="bg-slate-100/80 text-slate-600 text-sm">
+                                                    <th className="p-4 border-b font-semibold">คีย์ที่ใช้ชน (Key)</th>
+                                                    <th className="p-4 border-b font-semibold w-32 text-center">จำนวนที่พบ</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {results.duplicateDetails.map((dup, i) => (
+                                                    <tr key={i} className="border-b last:border-0 hover:bg-slate-50 transition">
+                                                        <td className="p-4 text-sm font-mono text-slate-700 bg-slate-50/50">{dup.key}</td>
+                                                        <td className="p-4 text-center">
+                                                            <span className="bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm font-bold border border-red-200">
+                                                                {dup.count}
+                                                            </span>
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
