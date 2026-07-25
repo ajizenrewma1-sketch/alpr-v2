@@ -45,39 +45,40 @@
     <script type="text/babel">
         const { useState, useEffect } = React;
 
+        const formatDisplayDate = (dateStr) => {
+            if (!dateStr) return '-';
+            const d = new Date(dateStr);
+            if (isNaN(d.getTime())) return dateStr;
+
+            const year = d.getFullYear();
+            const month = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            const hours = String(d.getHours()).padStart(2, '0');
+            const minutes = String(d.getMinutes()).padStart(2, '0');
+            const seconds = String(d.getSeconds()).padStart(2, '0');
+
+            return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+        };
+
+        // ==========================================
+        // ดึง NavItem มาไว้นอก App ตรงนี้ (อยู่นิ่งๆ ไม่กะพริบ)
+        // ==========================================
+        const NavItem = ({ icon, label, id, activeMenu, setActiveMenu }) => (
+            <button 
+                onClick={() => setActiveMenu(id)}
+                className={`w-full flex items-center gap-3 px-6 py-3 text-sm transition-all duration-200 border-l-4 ${
+                    activeMenu === id 
+                    ? 'bg-sidebarActive border-brandYellow text-white font-medium' 
+                    : 'border-transparent text-slate-400 hover:bg-sidebarHover hover:text-slate-200'
+                }`}
+            >
+                <i className={`fa-solid ${icon} w-5 text-center ${activeMenu === id ? 'text-brandYellow' : ''}`}></i>
+                <span>{label}</span>
+            </button>
+        );
+
         function App() {
-const GAS_URL = "https://script.google.com/macros/s/AKfycbxfTQgd4er49wl7qn7CpRu5y1ccSe6ooWjTDzkUinl7l4HWPOXpUn3xoENJAepeb5U6/exec";
-
-const fetchHistoryFromCloud = async () => {
-    try {
-        const response = await fetch(`${GAS_URL}?action=getHistory`);
-        const data = await response.json();
-        if (Array.isArray(data)) {
-            setHistoryItems(data);
-        }
-    } catch (err) {
-        console.error("Failed to load history:", err);
-    }
-};
-
-useEffect(() => {
-    fetchHistoryFromCloud(); // โหลดประวัติจาก Google Sheets ทันทีที่เปิดเว็บ
-    
-    const timer = setInterval(() => {
-        const now = new Date();
-        setCurrentTime(now);
-        // ... (ระบบนับถอยหลังหมดอายุ 24 ชม. คงเดิม)
-    }, 1000);
-    return () => clearInterval(timer);
-}, []);
-
-            const parseLocalDate = (dateStr) => {
-                if (!dateStr) return new Date();
-                const [datePart, timePart] = dateStr.split(' ');
-                const [y, m, d] = datePart.split('-').map(Number);
-                const [h, min, s] = timePart.split(':').map(Number);
-                return new Date(y, m - 1, d, h, min, s);
-            };
+            const GAS_URL = "https://script.google.com/macros/s/AKfycbxfTQgd4er49wl7qn7CpRu5y1ccSe6ooWjTDzkUinl7l4HWPOXpUn3xoENJAepeb5U6/exec";
 
             const [activeMenu, setActiveMenu] = useState('home');
             const [fileAll, setFileAll] = useState({ name: '', headers: [], rows: [], originalWs: null });
@@ -90,8 +91,24 @@ useEffect(() => {
             const [resetKey, setResetKey] = useState(0);
             const [currentTime, setCurrentTime] = useState(new Date());
             const [historyItems, setHistoryItems] = useState([]);
+	    const [isDownloading, setIsDownloading] = useState(false);
+	    const [downloadMessage, setDownloadMessage] = useState("กำลังเตรียมไฟล์สำหรับดาวน์โหลด...");
+
+            const fetchHistoryFromCloud = async () => {
+                try {
+                    const response = await fetch(`${GAS_URL}?action=getHistory`);
+                    const data = await response.json();
+                    if (Array.isArray(data)) {
+                        setHistoryItems(data);
+                    }
+                } catch (err) {
+                    console.error("Failed to load history:", err);
+                }
+            };
 
             useEffect(() => {
+                fetchHistoryFromCloud();
+                
                 const timer = setInterval(() => {
                     const now = new Date();
                     setCurrentTime(now);
@@ -99,7 +116,13 @@ useEffect(() => {
                     setHistoryItems(prevItems =>
                         prevItems.map(item => {
                             if (item.status === 'expired' || item.status === 'error') return item;
-                            const createdDate = parseLocalDate(item.date);
+                            if (!item.date) return item;
+
+                            const normalizedStr = typeof item.date === 'string' ? item.date.replace(' ', 'T') : item.date;
+                            const createdDate = new Date(normalizedStr);
+
+                            if (isNaN(createdDate.getTime())) return item;
+
                             const expiryDate = new Date(createdDate.getTime() + 24 * 60 * 60 * 1000);
                             
                             if (now >= expiryDate) {
@@ -113,7 +136,20 @@ useEffect(() => {
                 return () => clearInterval(timer);
             }, []);
 
-            // ฟังก์ชันสร้าง Workbook จาก originalWs และอุ้มสูตร/รูปภาพมาด้วย 100% (ไม่ให้เป็น 0)
+            const parseLocalDate = (dateStr) => {
+                if (!dateStr || typeof dateStr !== 'string') {
+                    return { year: 0, month: 0, day: 0, time: "00:00:00" };
+                }
+                const parts = dateStr.split(' ')[0].split('-');
+                const timePart = dateStr.split(' ')[1] || "00:00:00";
+                return {
+                    year: parseInt(parts[0]),
+                    month: parseInt(parts[1]),
+                    day: parseInt(parts[2]),
+                    time: timePart
+                };
+            };
+
             const buildMatchedWorkbook = (matchedRows) => {
                 if (!fileAll.originalWs) return null;
                 const originalWs = fileAll.originalWs;
@@ -128,21 +164,15 @@ useEffect(() => {
                         if (cell) {
                             const newCellAddress = XLSX.utils.encode_cell({ r: destRowIdx, c: C });
                             const copiedCell = JSON.parse(JSON.stringify(cell));
-                            
-                            // หากเป็นเซลล์สูตร (เช่น =IMAGE) ให้เคลียร์ค่า v ออก เพื่อบังคับให้ Excel รันสูตรใหม่และไม่แสดงค่า 0 ค้างไว้
                             if (copiedCell.f) {
                                 delete copiedCell.v;
                             }
-                            
                             newWs[newCellAddress] = copiedCell;
                         }
                     }
                 };
 
-                // คัดลอก Header (แถวแรก)
                 copyRow(0, newRowIdx++);
-                
-                // คัดลอกแถวที่ Match โดยอิงจาก _originalRowIdx
                 matchedRows.forEach(row => {
                     if (row._originalRowIdx !== undefined) {
                         copyRow(row._originalRowIdx, newRowIdx++);
@@ -156,10 +186,7 @@ useEffect(() => {
             };
 
             const uploadToGoogleDrive = async (fileName, matchedRows) => {
-                const GAS_URL = "https://script.google.com/macros/s/AKfycbxfTQgd4er49wl7qn7CpRu5y1ccSe6ooWjTDzkUinl7l4HWPOXpUn3xoENJAepeb5U6/exec";
-
                 try {
-                    // ใช้ฟังก์ชันสร้าง Workbook ตัวเดียวกัน เพื่อรักษาสูตรและรูปภาพไว้ ไม่ให้กลายเป็น 0 บนคลาวด์
                     const wb = buildMatchedWorkbook(matchedRows);
                     if (!wb) return "error_file_id";
 
@@ -185,7 +212,6 @@ useEffect(() => {
 
             const deleteFileFromGoogleDrive = async (fileId) => {
                 if (!fileId) return;
-                const GAS_URL = "https://script.google.com/macros/s/AKfycbxfTQgd4er49wl7qn7CpRu5y1ccSe6ooWjTDzkUinl7l4HWPOXpUn3xoENJAepeb5U6/exec";
                 try {
                     await fetch(`${GAS_URL}?action=delete&fileId=${fileId}`);
                 } catch (err) {
@@ -195,24 +221,58 @@ useEffect(() => {
 
             const handleDownloadHistory = (item) => {
                 if (item.status === 'expired' || item.status === 'error' || !item.driveFileId) {
-                    alert("ไม่สามารถดาวน์โหลดได้ เนื่องจากไฟล์หมดอายุ เกิดข้อผิดพลาด หรือไม่พบข้อมูลตรงกัน");
+                    alert("ไม่สามารถดาวน์โหลดได้ เนื่องจากไฟล์หมดอายุ เกิดข้อผิดพลาด หรือไม่พบรหัสไฟล์ในระบบ");
                     return;
                 }
-                alert(`กำลังดาวน์โหลดไฟล์ผลลัพธ์จาก Google Drive Cloud (ID: ${item.driveFileId})...`);
+
+                setIsDownloading(true);
+                setDownloadMessage("กำลังเชื่อมต่อเพื่อดาวน์โหลดไฟล์...");
+
+                try {
+                    const downloadUrl = `https://drive.google.com/uc?export=download&id=${item.driveFileId}`;
+                    
+                    setDownloadMessage("กำลังดาวน์โหลดไฟล์ลงเครื่อง...");
+
+                    // สร้าง Hidden Iframe เพื่อหลีกเลี่ยงปัญหา CORS และไม่ต้องเด้งเปิดแท็บใหม่
+                    const iframe = document.createElement('iframe');
+                    iframe.style.display = 'none';
+                    iframe.src = downloadUrl;
+                    document.body.appendChild(iframe);
+
+                    // หน่วงเวลาปิด Popup และลบ Iframe ออกหลังเริ่มดาวน์โหลด
+                    setTimeout(() => {
+                        try {
+                            document.body.removeChild(iframe);
+                        } catch (e) {
+                            // ป้องกันกรณีถูกลบไปแล้ว
+                        }
+                        setIsDownloading(false);
+                    }, 3500);
+
+                } catch (err) {
+                    console.error("Download failed:", err);
+                    alert("เกิดข้อผิดพลาดในการดาวน์โหลด กรุณาลองใหม่อีกครั้ง");
+                    setIsDownloading(false);
+                }
             };
 
             const handleDeleteHistory = async (id) => {
-    const item = historyItems.find(i => i.id === id);
-    if (item) {
-        await fetch(`${GAS_URL}?action=delete&fileId=${item.driveFileId || ''}&id=${id}`);
-    }
-    setHistoryItems(prev => prev.filter(i => i.id !== id));
-};
+                const item = historyItems.find(i => i.id === id);
+                if (item) {
+                    await fetch(`${GAS_URL}?action=delete&fileId=${item.driveFileId || ''}&id=${id}`);
+                }
+                setHistoryItems(prev => prev.filter(i => i.id !== id));
+            };
 
             const formatTimeRemaining = (dateStr) => {
-                const createdDate = parseLocalDate(dateStr);
+                if (!dateStr) return '-';
+                const normalizedStr = typeof dateStr === 'string' ? dateStr.replace(' ', 'T') : dateStr;
+                const createdDate = new Date(normalizedStr);
+                if (isNaN(createdDate.getTime())) return '-';
+
                 const expiryDate = new Date(createdDate.getTime() + 24 * 60 * 60 * 1000);
-                const diff = expiryDate - currentTime;
+                const nowTime = currentTime;
+                const diff = expiryDate - nowTime;
 
                 if (diff <= 0) return 'หมดอายุ';
 
@@ -316,122 +376,118 @@ useEffect(() => {
             };
 
             const runMatching = async () => {
-    if (keyColsAll.length === 0 || keyColsR05.length === 0) {
-        alert("กรุณาเลือกคอลัมน์สำหรับสร้าง Key ให้ครบถ้วน");
-        return;
-    }
-    setIsProcessing(true);
-    setActiveMenu('history');
-
-    const d = new Date();
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    const hours = String(d.getHours()).padStart(2, '0');
-    const minutes = String(d.getMinutes()).padStart(2, '0');
-    const seconds = String(d.getSeconds()).padStart(2, '0');
-    const nowStr = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-
-    const newHistoryId = historyItems.length > 0 ? Math.max(...historyItems.map(i => i.id)) + 1 : 1;
-    const initialHistoryItem = {
-        id: newHistoryId,
-        type: 'ชนข้อมูล (Match)',
-        condition: 'All + R05 (ALPR)',
-        date: nowStr,
-        status: 'processing',
-        progress: 50,
-        records: 0,
-        driveFileId: ''
-    };
-
-    // อัปเดต State ฝั่งหน้าเว็บ
-    setHistoryItems(prev => [initialHistoryItem, ...prev]);
-
-    // [เพิ่มใหม่] บันทึกประวัติสถานะ 'processing' ลง Google Sheets ทันที
-    try {
-        await fetch(GAS_URL, {
-            method: "POST",
-            body: JSON.stringify({ action: "saveHistory", ...initialHistoryItem })
-        });
-    } catch (err) {
-        console.error("Failed to save initial history to cloud:", err);
-    }
-
-    setTimeout(async () => {
-        const filteredR05 = fileR05.rows.filter(r => String(r["ประเภทระบบ"]) === "ALPR");
-        const mapR05 = new Map();
-        filteredR05.forEach(row => {
-            const key = generateKey(row, keyColsR05, false);
-            mapR05.set(key, true);
-        });
-
-        const matchedRows = [];
-        const keyCounts = {};
-
-        fileAll.rows.forEach(row => {
-            const key = generateKey(row, keyColsAll, true);
-            if (mapR05.has(key)) {
-                matchedRows.push(row);
-                keyCounts[key] = (keyCounts[key] || 0) + 1;
-            }
-        });
-
-        const duplicateDetails = Object.keys(keyCounts)
-            .filter(k => keyCounts[k] > 1)
-            .map(k => ({ key: k, count: keyCounts[k] }))
-            .sort((a, b) => b.count - a.count);
-
-        setResults({
-            totalAll: fileAll.rows.length,
-            totalR05: fileR05.rows.length,
-            totalR05ALPR: filteredR05.length,
-            matchedCount: matchedRows.length,
-            duplicateDetails: duplicateDetails,
-            data: matchedRows 
-        });
-        setIsProcessing(false);
-
-        const isNoMatch = matchedRows.length === 0;
-
-        if (isNoMatch) {
-            setHistoryItems(prev => prev.map(item => {
-                if (item.id === newHistoryId) {
-                    return { ...item, status: 'error', progress: 100, records: 0 };
+                if (keyColsAll.length === 0 || keyColsR05.length === 0) {
+                    alert("กรุณาเลือกคอลัมน์สำหรับสร้าง Key ให้ครบถ้วน");
+                    return;
                 }
-                return item;
-            }));
+                setIsProcessing(true);
+                setActiveMenu('history');
 
-            // [เพิ่มใหม่] อัปเดตสถานะ error ลง Google Sheets เมื่อไม่พบข้อมูลที่ตรงกัน
-            try {
-                await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=error&records=0`);
-            } catch (err) {
-                console.error("Failed to update error history on cloud:", err);
-            }
-        } else {
-            try {
-                const fileId = await uploadToGoogleDrive("Matched_Result.xlsx", matchedRows);
-                
-                setHistoryItems(prev => prev.map(item => {
-                    if (item.id === newHistoryId) {
-                        return {
-                            ...item,
-                            status: 'done',
-                            progress: 100,
-                            records: matchedRows.length,
-                            driveFileId: fileId
-                        };
+                const d = new Date();
+                const year = d.getFullYear();
+                const month = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                const hours = String(d.getHours()).padStart(2, '0');
+                const minutes = String(d.getMinutes()).padStart(2, '0');
+                const seconds = String(d.getSeconds()).padStart(2, '0');
+                const nowStr = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+
+                const newHistoryId = historyItems.length > 0 ? Math.max(...historyItems.map(i => i.id)) + 1 : 1;
+                const initialHistoryItem = {
+                    id: newHistoryId,
+                    type: 'ชนข้อมูล (Match)',
+                    condition: 'All + R05 (ALPR)',
+                    date: nowStr,
+                    status: 'processing',
+                    progress: 50,
+                    records: 0,
+                    driveFileId: ''
+                };
+
+                setHistoryItems(prev => [initialHistoryItem, ...prev]);
+
+                try {
+                    await fetch(GAS_URL, {
+                        method: "POST",
+                        body: JSON.stringify({ action: "saveHistory", ...initialHistoryItem })
+                    });
+                } catch (err) {
+                    console.error("Failed to save initial history to cloud:", err);
+                }
+
+                setTimeout(async () => {
+                    const filteredR05 = fileR05.rows.filter(r => String(r["ประเภทระบบ"]) === "ALPR");
+                    const mapR05 = new Map();
+                    filteredR05.forEach(row => {
+                        const key = generateKey(row, keyColsR05, false);
+                        mapR05.set(key, true);
+                    });
+
+                    const matchedRows = [];
+                    const keyCounts = {};
+
+                    fileAll.rows.forEach(row => {
+                        const key = generateKey(row, keyColsAll, true);
+                        if (mapR05.has(key)) {
+                            matchedRows.push(row);
+                            keyCounts[key] = (keyCounts[key] || 0) + 1;
+                        }
+                    });
+
+                    const duplicateDetails = Object.keys(keyCounts)
+                        .filter(k => keyCounts[k] > 1)
+                        .map(k => ({ key: k, count: keyCounts[k] }))
+                        .sort((a, b) => b.count - a.count);
+
+                    setResults({
+                        totalAll: fileAll.rows.length,
+                        totalR05: fileR05.rows.length,
+                        totalR05ALPR: filteredR05.length,
+                        matchedCount: matchedRows.length,
+                        duplicateDetails: duplicateDetails,
+                        data: matchedRows 
+                    });
+                    setIsProcessing(false);
+
+                    const isNoMatch = matchedRows.length === 0;
+
+                    if (isNoMatch) {
+                        setHistoryItems(prev => prev.map(item => {
+                            if (item.id === newHistoryId) {
+                                return { ...item, status: 'error', progress: 100, records: 0 };
+                            }
+                            return item;
+                        }));
+
+                        try {
+                            await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=error&records=0`);
+                        } catch (err) {
+                            console.error("Failed to update error history on cloud:", err);
+                        }
+                    } else {
+                        try {
+                            const fileId = await uploadToGoogleDrive("Matched_Result.xlsx", matchedRows);
+                            
+                            setHistoryItems(prev => prev.map(item => {
+                                if (item.id === newHistoryId) {
+                                    return {
+                                        ...item,
+                                        status: 'done',
+                                        progress: 100,
+                                        records: matchedRows.length,
+                                        driveFileId: fileId
+                                    };
+                                }
+                                return item;
+                            }));
+
+                            await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=done&records=${matchedRows.length}&driveFileId=${fileId}`);
+                        } catch (err) {
+                            console.error("Failed to upload file or update history on cloud:", err);
+                        }
                     }
-                    return item;
-                }));
-
-                // [เพิ่มใหม่] อัปเดตสถานะ done, จำนวนเรคอร์ด และ Drive File ID ลง Google Sheets
-                await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=done&records=${matchedRows.length}&driveFileId=${fileId}`);
-            } catch (err) {
-                console.error("Failed to upload file or update history on cloud:", err);
-            }
-        }
-    }, 500);
-};
+                }, 500);
+            };
 
             const downloadResult = () => {
                 if (!results || results.data.length === 0) return;
@@ -442,20 +498,6 @@ useEffect(() => {
                     alert("ไม่พบไฟล์ต้นฉบับสำหรับการคัดลอกเซลล์");
                 }
             };
-
-            const NavItem = ({ icon, label, id }) => (
-                <button 
-                    onClick={() => setActiveMenu(id)}
-                    className={`w-full flex items-center gap-3 px-6 py-3 text-sm transition-all duration-200 border-l-4 ${
-                        activeMenu === id 
-                        ? 'bg-sidebarActive border-brandYellow text-white font-medium' 
-                        : 'border-transparent text-slate-400 hover:bg-sidebarHover hover:text-slate-200'
-                    }`}
-                >
-                    <i className={`fa-solid ${icon} w-5 text-center ${activeMenu === id ? 'text-brandYellow' : ''}`}></i>
-                    <span>{label}</span>
-                </button>
-            );
 
             const renderHomeView = () => (
                 <div className="animate-fade-in space-y-6">
@@ -676,7 +718,9 @@ useEffect(() => {
                                             <td className="p-4">
                                                 <div className="text-slate-700 text-xs bg-slate-100 px-2.5 py-1 rounded-md inline-block">{row.condition}</div>
                                             </td>
-                                            <td className="p-4 text-slate-500 text-xs">{row.date}</td>
+                                            
+                                            <td className="p-4 text-slate-500 text-xs">{formatDisplayDate(row.date)}</td>
+
                                             <td className="p-4 text-center">
                                                 {row.status === 'done' && (
                                                     <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700 border border-emerald-200">
@@ -767,9 +811,10 @@ useEffect(() => {
                         </div>
                         
                         <div className="flex-1 py-6 flex flex-col gap-1 overflow-y-auto custom-scrollbar">
-                            <NavItem icon="fa-house" label="หน้าหลัก" id="home" />
-                            <NavItem icon="fa-file-lines" label="ออกรายงาน (ชนข้อมูล)" id="match" />
-                            <NavItem icon="fa-bars-staggered" label="รายงานของฉัน" id="history" />
+                            {/* เรียกใช้งาน NavItem พร้อมส่งค่า activeMenu และ setActiveMenu เข้าไป */}
+                            <NavItem icon="fa-house" label="หน้าหลัก" id="home" activeMenu={activeMenu} setActiveMenu={setActiveMenu} />
+                            <NavItem icon="fa-file-lines" label="ออกรายงาน (ชนข้อมูล)" id="match" activeMenu={activeMenu} setActiveMenu={setActiveMenu} />
+                            <NavItem icon="fa-bars-staggered" label="รายงานของฉัน" id="history" activeMenu={activeMenu} setActiveMenu={setActiveMenu} />
                         </div>
                         
                         <div className="p-4 border-t border-slate-700/50 bg-[#11141c]">
@@ -832,6 +877,19 @@ useEffect(() => {
                                             ))}
                                         </tbody>
                                     </table>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Popup วงกลมหมุนวนสำหรับดาวน์โหลด */}
+                    {isDownloading && (
+                        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-50 p-4 backdrop-blur-sm animate-fade-in">
+                            <div className="bg-white rounded-xl shadow-2xl p-6 max-w-sm w-full flex flex-col items-center text-center space-y-4">
+                                <div className="w-12 h-12 border-4 border-amber-500 border-t-transparent rounded-full animate-spin"></div>
+                                <div>
+                                    <h3 className="font-bold text-slate-800 text-lg">กำลังดาวน์โหลด</h3>
+                                    <p className="text-slate-500 text-sm mt-1">{downloadMessage}</p>
                                 </div>
                             </div>
                         </div>
