@@ -561,14 +561,15 @@
                                 return item;
                             }));
 
-                            // บันทึกลง Google Sheet แบบ POST ทีเดียวจบ สมบูรณ์ 100%
+                            // บันทึกลง Google Sheet พร้อมแปลง duplicateDetails เป็น JSON String
                             try {
                                 await fetch(GAS_URL, {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                                     body: JSON.stringify({
                                         action: "saveHistory",
-                                        ...finalItem
+                                        ...finalItem,
+                                        duplicateDetails: JSON.stringify(finalItem.duplicateDetails || [])
                                     })
                                 });
                             } catch (err) {
