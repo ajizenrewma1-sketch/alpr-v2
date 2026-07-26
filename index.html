@@ -105,35 +105,34 @@
             };
 
             useEffect(() => {
-    fetchHistoryFromCloud();
-    
-    const timer = setInterval(() => {
-        const now = new Date();
-        setCurrentTime(now);
-
-        setHistoryItems(prevItems =>
-            prevItems.map(item => {
-                if (item.status === 'error' || item.status === 'processing') return item;
-                if (!item.date) return item;
-
-                const normalizedStr = typeof item.date === 'string' ? item.date.replace(' ', 'T') : item.date;
-                const createdDate = new Date(normalizedStr);
-
-                if (isNaN(createdDate.getTime())) return item;
-
-                const expiryDate = new Date(createdDate.getTime() + 24 * 60 * 60 * 1000);
+                fetchHistoryFromCloud();
                 
-                // ถ้าหมดเวลาและยังมี driveFileId อยู่ ให้ลบไฟล์บน Cloud ออก แต่สถานะ (status) จะไม่เปลี่ยนเป็น expired
-                if (now >= expiryDate && item.driveFileId) {
-                    deleteFileFromGoogleDrive(item.driveFileId);
-                    return { ...item, driveFileId: '' };
-                }
-                return item;
-            })
-        );
-    }, 1000);
-    return () => clearInterval(timer);
-}, []);
+                const timer = setInterval(() => {
+                    const now = new Date();
+                    setCurrentTime(now);
+
+                    setHistoryItems(prevItems =>
+                        prevItems.map(item => {
+                            if (item.status === 'expired' || item.status === 'error') return item;
+                            if (!item.date) return item;
+
+                            const normalizedStr = typeof item.date === 'string' ? item.date.replace(' ', 'T') : item.date;
+                            const createdDate = new Date(normalizedStr);
+
+                            if (isNaN(createdDate.getTime())) return item;
+
+                            const expiryDate = new Date(createdDate.getTime() + 24 * 60 * 60 * 1000);
+                            
+                            if (now >= expiryDate) {
+                                if (item.driveFileId) deleteFileFromGoogleDrive(item.driveFileId);
+                                return { ...item, status: 'expired', driveFileId: '' };
+                            }
+                            return item;
+                        })
+                    );
+                }, 1000);
+                return () => clearInterval(timer);
+            }, []);
 
             const parseLocalDate = (dateStr) => {
                 if (!dateStr || typeof dateStr !== 'string') {
