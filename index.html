@@ -12,6 +12,10 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.21.4/babel.min.js"></script>
+    
+    <!-- โหลด Google Identity Services -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    
     <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     
     <script>
@@ -92,6 +96,33 @@
             const [isDownloading, setIsDownloading] = useState(false);
             const [downloadMessage, setDownloadMessage] = useState("กำลังเตรียมไฟล์สำหรับดาวน์โหลด...");
 
+            // State สำหรับ Google Drive Upload
+            const [googleAccessToken, setGoogleAccessToken] = useState(null);
+            const [tokenClient, setTokenClient] = useState(null);
+            const [uploadFile, setUploadFile] = useState(null);
+
+            // ตั้งค่าระบบ Google OAuth
+            useEffect(() => {
+                const initGoogle = () => {
+                    if (typeof google !== 'undefined' && google.accounts) {
+                        const client = google.accounts.oauth2.initTokenClient({
+                            client_id: '395374134249-mgi5h4kguf2g0dva4bl870a6jkjb0ct9.apps.googleusercontent.com', 
+                            scope: 'https://www.googleapis.com/auth/drive.file',
+                            callback: (response) => {
+                                if (response.access_token) {
+                                    setGoogleAccessToken(response.access_token);
+                                    alert("เชื่อมต่อ Google Drive สำเร็จเรียบร้อย!");
+                                }
+                            },
+                        });
+                        setTokenClient(client);
+                    } else {
+                        setTimeout(initGoogle, 500);
+                    }
+                };
+                initGoogle();
+            }, []);
+
             const fetchHistoryFromCloud = async () => {
                 try {
                     const response = await fetch(`${GAS_URL}?action=getHistory`);
@@ -134,18 +165,69 @@
                 return () => clearInterval(timer);
             }, []);
 
-            const parseLocalDate = (dateStr) => {
-                if (!dateStr || typeof dateStr !== 'string') {
-                    return { year: 0, month: 0, day: 0, time: "00:00:00" };
+            // ฟังก์ชันอัปโหลด Google Drive โดยตรง
+            const handleGoogleAuthClick = () => {
+                if (tokenClient) {
+                    tokenClient.requestAccessToken({ prompt: 'consent' });
+                } else {
+                    alert("กำลังโหลดระบบ Google กรุณารอสักครู่...");
                 }
-                const parts = dateStr.split(' ')[0].split('-');
-                const timePart = dateStr.split(' ')[1] || "00:00:00";
-                return {
-                    year: parseInt(parts[0]),
-                    month: parseInt(parts[1]),
-                    day: parseInt(parts[2]),
-                    time: timePart
-                };
+            };
+
+            const handleGoogleUpload = async () => {
+                if (!googleAccessToken) {
+                    alert("กรุณากด 'เชื่อมต่อบัญชี Google Drive' ก่อนครับ!");
+                    return;
+                }
+                if (!uploadFile) {
+                    alert("กรุณาเลือกไฟล์ที่ต้องการอัปโหลดก่อนครับ!");
+                    return;
+                }
+
+                alert(`กำลังอัปโหลดไฟล์ "${uploadFile.name}" ขึ้น Google Drive...`);
+
+                try {
+                    const metadata = { name: uploadFile.name, mimeType: uploadFile.type || 'application/octet-stream' };
+                    const initResponse = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${googleAccessToken}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(metadata)
+                    });
+
+                    if (!initResponse.ok) throw new Error("ไม่สามารถสร้างเซสชันการอัปโหลดได้");
+                    
+                    const uploadUrl = initResponse.headers.get('Location');
+                    const uploadResponse = await fetch(uploadUrl, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': uploadFile.type || 'application/octet-stream' },
+                        body: uploadFile
+                    });
+
+                    if (uploadResponse.ok) {
+                        alert("อัปโหลดไฟล์ขึ้น Google Drive สำเร็จเรียบร้อยแล้ว!");
+                        setUploadFile(null); 
+                        setResetKey(prev => prev + 1); // รีเซ็ตหน้าต่างเลือกไฟล์
+                    } else {
+                        throw new Error("เกิดข้อผิดพลาดในการอัปโหลดไฟล์");
+                    }
+                } catch (error) {
+                    console.error(error);
+                    alert("เกิดข้อผิดพลาด: " + error.message);
+                }
+            };
+
+            // Soft Logout ล้างข้อมูลโดยไม่โหลดหน้าใหม่
+            const handleSoftLogout = () => {
+                setActiveMenu('home');
+                setFileAll({ name: '', headers: [], rows: [], originalWs: null });
+                setFileR05({ name: '', headers: [], rows: [], originalWs: null });
+                setResults(null);
+                setUploadFile(null);
+                setResetKey(prev => prev + 1);
+                alert("ออกจากระบบเรียบร้อยแล้ว");
             };
 
             const buildMatchedWorkbook = (matchedRows) => {
@@ -287,6 +369,7 @@
                 setResults(null);
                 setIsProcessing(false);
                 setActiveDuplicateModalData(null);
+                setUploadFile(null); // เคลียร์ไฟล์ฝั่ง Google Drive อัปโหลดด้วย
                 setResetKey(prev => prev + 1);
             };
 
@@ -529,6 +612,43 @@
                             <p className="text-sm text-slate-500">
                                 ติดตามสถานะคิวงาน และดาวน์โหลดไฟล์ที่ดำเนินการเสร็จแล้วย้อนหลัง
                             </p>
+                        </div>
+                    </div>
+
+                    {/* กล่องอัปโหลด Google Drive */}
+                    <div className="mt-8 bg-white p-6 rounded-xl shadow-sm border border-slate-200 max-w-3xl animate-fade-in">
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="w-10 h-10 bg-blue-50 text-blue-500 rounded-lg flex items-center justify-center">
+                                <i className="fa-brands fa-google-drive text-lg"></i>
+                            </div>
+                            <div>
+                                <h3 className="font-semibold text-slate-800">ระบบอัปโหลดไฟล์ด่วนเข้า Google Drive</h3>
+                                <p className="text-sm text-slate-500">สำรองข้อมูลหรืออัปโหลดไฟล์ขนาดใหญ่ขึ้นคลาวด์โดยตรง</p>
+                            </div>
+                        </div>
+                        
+                        <div className="flex flex-col md:flex-row gap-4 items-end bg-slate-50 p-4 rounded-lg border border-slate-100">
+                            <div className="flex-1 w-full">
+                                <button 
+                                    onClick={handleGoogleAuthClick}
+                                    className={`w-full py-2.5 px-4 rounded-md text-sm font-medium transition-all mb-3 ${googleAccessToken ? 'bg-emerald-100 text-emerald-700 border border-emerald-200 cursor-default' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm'}`}
+                                >
+                                    {googleAccessToken ? <><i className="fa-solid fa-check-circle mr-2"></i>เชื่อมต่อบัญชีสำเร็จแล้ว</> : '1. เชื่อมต่อบัญชี Google Drive'}
+                                </button>
+                                <input 
+                                    key={`gdrive-upload-${resetKey}`}
+                                    type="file" 
+                                    onChange={(e) => setUploadFile(e.target.files[0])}
+                                    className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-slate-200 file:text-slate-700 hover:file:bg-slate-300 file:font-medium file:cursor-pointer border border-slate-200 rounded-md bg-white"
+                                />
+                            </div>
+                            <button 
+                                onClick={handleGoogleUpload}
+                                disabled={!googleAccessToken || !uploadFile}
+                                className={`py-2.5 px-6 rounded-md text-sm font-medium transition-all whitespace-nowrap h-[42px] ${(!googleAccessToken || !uploadFile) ? 'bg-slate-300 text-slate-500 cursor-not-allowed' : 'bg-teal-600 hover:bg-teal-700 text-white shadow-sm'}`}
+                            >
+                                2. อัปโหลดขึ้น Drive
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -832,7 +952,7 @@
                                         <div className="text-slate-400">ผู้ใช้งาน</div>
                                     </div>
                                 </div>
-                                <button className="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 rounded transition">
+                                <button onClick={handleSoftLogout} className="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 rounded transition">
                                     <i className="fa-solid fa-arrow-right-from-bracket"></i>
                                 </button>
                             </div>
