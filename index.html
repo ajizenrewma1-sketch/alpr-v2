@@ -97,7 +97,30 @@
                     const response = await fetch(`${GAS_URL}?action=getHistory`);
                     const data = await response.json();
                     if (Array.isArray(data)) {
-                        setHistoryItems(data);
+                        setHistoryItems(prevItems => {
+                            // 1. ดึงรายการในเครื่องที่กำลังคำนวณหรือกำลังอัปโหลดอยู่
+                            const inProgressLocalItems = prevItems.filter(
+                                item => item.status === 'calculating' || item.status === 'uploading'
+                            );
+
+                            // 2. นำข้อมูลจาก Cloud มาแมตช์ แต่รักษาสถานะกำลังทำในเครื่องไว้
+                            const mergedCloudItems = data.map(cloudItem => {
+                                const localItem = prevItems.find(p => p.id === cloudItem.id);
+                                if (localItem && (localItem.status === 'calculating' || localItem.status === 'uploading')) {
+                                    return localItem; 
+                                }
+                                if (localItem && localItem.status === 'done' && cloudItem.status === 'processing') {
+                                    return localItem;
+                                }
+                                return cloudItem;
+                            });
+
+                            // 3. รวมรายการที่กำลังทำอยู่เข้ากับข้อมูลจาก Cloud โดยป้องกันไม่ให้ซ้ำกัน
+                            const cloudIds = new Set(mergedCloudItems.map(i => i.id));
+                            const uniqueLocalInProgress = inProgressLocalItems.filter(i => !cloudIds.has(i.id));
+
+                            return [...uniqueLocalInProgress, ...mergedCloudItems];
+                        });
                     }
                 } catch (err) {
                     console.error("Failed to load history:", err);
@@ -217,22 +240,20 @@
                     };
 
                     const response = await fetch(GAS_URL, {
-                        method: "POST",
+                        method: 'POST',
+                        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                         body: JSON.stringify(payload)
                     });
 
                     const result = await response.json();
-                    
                     if (result.status === "success") {
                         return result.fileId;
                     } else {
                         console.error("GAS Upload Error:", result.message);
-                        alert("อัปโหลดไม่สำเร็จเนื่องจาก: " + result.message);
                         return "error_file_id";
                     }
-                } catch (error) {
-                    console.error("Fetch Error:", error);
-                    alert("เกิดข้อผิดพลาดในการเชื่อมต่อ: " + error.message);
+                } catch (err) {
+                    console.error("Upload failed:", err);
                     return "error_file_id";
                 }
             };
@@ -431,8 +452,8 @@
                     type: 'ชนข้อมูล (Match)',
                     condition: 'All + R05 (ALPR)',
                     date: nowStr,
-                    status: 'processing',
-                    progress: 50,
+                    status: 'calculating',
+                    progress: 20,
                     records: 0,
                     driveFileId: '',
                     duplicateDetails: []
@@ -440,16 +461,8 @@
 
                 setHistoryItems(prev => [initialHistoryItem, ...prev]);
 
-                try {
-                    await fetch(GAS_URL, {
-                        method: "POST",
-                        body: JSON.stringify({ action: "saveHistory", ...initialHistoryItem })
-                    });
-                } catch (err) {
-                    console.error("Failed to save initial history to cloud:", err);
-                }
-
                 setTimeout(async () => {
+                    // ขั้นตอนที่ 1: กำลังคำนวณ
                     const filteredR05 = fileR05.rows.filter(r => String(r["ประเภทระบบ"]) === "ALPR");
                     const mapR05 = new Map();
                     filteredR05.forEach(row => {
@@ -481,44 +494,86 @@
                         duplicateDetails: duplicateDetails,
                         data: matchedRows 
                     });
-                    setIsProcessing(false);
 
                     const isNoMatch = matchedRows.length === 0;
 
                     if (isNoMatch) {
+                        setIsProcessing(false);
                         setHistoryItems(prev => prev.map(item => {
                             if (item.id === newHistoryId) {
                                 return { ...item, status: 'error', progress: 100, records: 0, duplicateDetails: duplicateDetails };
                             }
                             return item;
                         }));
-
-                        try {
-                            await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=error&records=0`);
-                        } catch (err) {
-                            console.error("Failed to update error history on cloud:", err);
-                        }
                     } else {
-                        try {
-                            const fileId = await uploadToGoogleDrive("Matched_Result.xlsx", matchedRows);
-                            
+                        // เปลี่ยนสถานะเป็น "กำลังอัปโหลด"
+                        setHistoryItems(prev => prev.map(item => {
+                            if (item.id === newHistoryId) {
+                                return { ...item, status: 'uploading', progress: 40, duplicateDetails: duplicateDetails };
+                            }
+                            return item;
+                        }));
+
+                        // สร้าง Fake Progress ค่อยๆ ขยับหลอดความคืบหน้าขึ้นไปรอ (จาก 40 ไปจนถึง 90)
+                        let fakeProgress = 40;
+                        const progressInterval = setInterval(() => {
+                            fakeProgress += 5;
+                            if (fakeProgress > 90) fakeProgress = 90;
                             setHistoryItems(prev => prev.map(item => {
                                 if (item.id === newHistoryId) {
-                                    return {
-                                        ...item,
-                                        status: 'done',
-                                        progress: 100,
-                                        records: matchedRows.length,
-                                        driveFileId: fileId,
-                                        duplicateDetails: duplicateDetails
-                                    };
+                                    return { ...item, progress: fakeProgress };
+                                }
+                                return item;
+                            }));
+                        }, 250);
+
+                        // ทำการอัปโหลดจริงด้วย fetch ไฟล์ขึ้น Drive
+                        const fileId = await uploadToGoogleDrive("Matched_Result.xlsx", matchedRows);
+
+                        // เคลียร์ Timer เมื่ออัปโหลดเสร็จสิ้น
+                        clearInterval(progressInterval);
+                        setIsProcessing(false);
+
+                        if (fileId === "error_file_id") {
+                            setHistoryItems(prev => prev.map(item => {
+                                if (item.id === newHistoryId) {
+                                    return { ...item, status: 'error', progress: 100 };
+                                }
+                                return item;
+                            }));
+                        } else {
+                            const finalItem = {
+                                id: newHistoryId,
+                                type: 'ชนข้อมูล (Match)',
+                                condition: 'All + R05 (ALPR)',
+                                date: nowStr,
+                                status: 'done',
+                                progress: 100,
+                                records: matchedRows.length,
+                                driveFileId: fileId,
+                                duplicateDetails: duplicateDetails
+                            };
+
+                            setHistoryItems(prev => prev.map(item => {
+                                if (item.id === newHistoryId) {
+                                    return finalItem;
                                 }
                                 return item;
                             }));
 
-                            await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=done&records=${matchedRows.length}&driveFileId=${fileId}`);
-                        } catch (err) {
-                            console.error("Failed to upload file or update history on cloud:", err);
+                            // บันทึกลง Google Sheet แบบ POST ทีเดียวจบ สมบูรณ์ 100%
+                            try {
+                                await fetch(GAS_URL, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                                    body: JSON.stringify({
+                                        action: "saveHistory",
+                                        ...finalItem
+                                    })
+                                });
+                            } catch (err) {
+                                console.error("Failed to save history to cloud:", err);
+                            }
                         }
                     }
                 }, 500);
@@ -784,9 +839,14 @@
                                                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> เสร็จแล้ว
                                                         </span>
                                                     )}
-                                                    {row.status === 'processing' && (
+                                                    {row.status === 'calculating' && (
                                                         <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-700 border border-amber-200">
                                                             <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span> กำลังคำนวน
+                                                        </span>
+                                                    )}
+                                                    {row.status === 'uploading' && (
+                                                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-sky-100 text-sky-700 border border-sky-200">
+                                                            <span className="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse"></span> กำลังอัปโหลด
                                                         </span>
                                                     )}
                                                     {row.status === 'error' && (
