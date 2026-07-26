@@ -113,7 +113,8 @@
 
                     setHistoryItems(prevItems =>
                         prevItems.map(item => {
-                            if (item.status === 'expired' || item.status === 'error') return item;
+                            // ปรับปรุงเงื่อนไข: ไม่เปลี่ยนสถานะเป็น expired แล้ว แต่จะให้ระบบจัดการลบไฟล์ใน Drive เมื่อครบกำหนดแทน
+                            if (item.status === 'expired' || item.status === 'error' || item.status === 'processing') return item;
                             if (!item.date) return item;
 
                             const normalizedStr = typeof item.date === 'string' ? item.date.replace(' ', 'T') : item.date;
@@ -124,8 +125,10 @@
                             const expiryDate = new Date(createdDate.getTime() + 24 * 60 * 60 * 1000);
                             
                             if (now >= expiryDate) {
-                                if (item.driveFileId) deleteFileFromGoogleDrive(item.driveFileId);
-                                return { ...item, status: 'expired', driveFileId: '' };
+                                if (item.driveFileId) {
+                                    deleteFileFromGoogleDrive(item.driveFileId);
+                                    return { ...item, driveFileId: '' }; // ลบ fileId ทิ้งแต่คงสถานะ 'done' ไว้ตามเดิม
+                                }
                             }
                             return item;
                         })
@@ -133,6 +136,12 @@
                 }, 1000);
                 return () => clearInterval(timer);
             }, []);
+
+	    useEffect(() => {
+                if (activeMenu === 'history') {
+                    fetchHistoryFromCloud();
+                }
+            }, [activeMenu]);
 
             const parseLocalDate = (dateStr) => {
                 if (!dateStr || typeof dateStr !== 'string') {
@@ -188,11 +197,9 @@
                     const wb = buildMatchedWorkbook(matchedRows);
                     if (!wb) return "error_file_id";
 
-                    // 1. แปลง Workbook เป็น ArrayBuffer
                     const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
                     const uint8Array = new Uint8Array(excelBuffer);
 
-                    // 2. แปลงเป็น Base64 แบบปลอดภัย (แบ่งย่อย 32KB ป้องกัน Stack Overflow)
                     let binary = '';
                     const len = uint8Array.length;
                     const batchSize = 32768;
@@ -202,7 +209,6 @@
                     }
                     const base64Data = btoa(binary);
 
-                    // 3. ส่งข้อมูลผ่าน POST ไปที่ Google Apps Script
                     const payload = {
                         action: "uploadFile",
                         filename: fileName || "M-Flow_Report.xlsx",
@@ -217,11 +223,9 @@
 
                     const result = await response.json();
                     
-                    // ถ้ารอด ส่งผ่านสำเร็จ คืนค่า fileId ปกติ
                     if (result.status === "success") {
                         return result.fileId;
                     } else {
-                        // แจ้งเตือน Error ที่แท้จริงจาก Google Apps Script ให้เห็นชัดๆ
                         console.error("GAS Upload Error:", result.message);
                         alert("อัปโหลดไม่สำเร็จเนื่องจาก: " + result.message);
                         return "error_file_id";
@@ -229,7 +233,7 @@
                 } catch (error) {
                     console.error("Fetch Error:", error);
                     alert("เกิดข้อผิดพลาดในการเชื่อมต่อ: " + error.message);
-                    return "error_file_id`";
+                    return "error_file_id";
                 }
             };
 
@@ -243,7 +247,17 @@
             };
 
             const handleDownloadHistory = (item) => {
-                if (item.status === 'expired' || item.status === 'error' || !item.driveFileId) {
+                // เช็คเงื่อนไขหมดอายุจากเวลาแทนสถานะ
+                const isExpired = (() => {
+                    if (!item.date) return false;
+                    const normalizedStr = typeof item.date === 'string' ? item.date.replace(' ', 'T') : item.date;
+                    const createdDate = new Date(normalizedStr);
+                    if (isNaN(createdDate.getTime())) return false;
+                    const expiryDate = new Date(createdDate.getTime() + 24 * 60 * 60 * 1000);
+                    return currentTime >= expiryDate;
+                })();
+
+                if (isExpired || item.status === 'error' || !item.driveFileId) {
                     alert("ไม่สามารถดาวน์โหลดได้ เนื่องจากไฟล์หมดอายุ เกิดข้อผิดพลาด หรือไม่พบรหัสไฟล์ในระบบ");
                     return;
                 }
@@ -732,95 +746,103 @@
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
-                                    {historyItems.map((row) => (
-                                        <tr key={row.id} className="hover:bg-slate-50/50 transition">
-                                            <td className="p-4 text-center text-slate-500">{row.id}</td>
-                                            <td className="p-4 text-slate-700 font-medium">{row.type}</td>
-                                            <td className="p-4">
-                                                <div className="flex flex-col gap-1.5 items-start">
-                                                    <div className="text-slate-700 text-xs bg-slate-100 px-2.5 py-1 rounded-md inline-block">{row.condition}</div>
-                                                    {row.duplicateDetails && row.duplicateDetails.length > 0 && (
-                                                        <button 
-                                                            onClick={() => setActiveDuplicateModalData(row.duplicateDetails)}
-                                                            className="text-xs text-amber-600 hover:text-amber-700 font-medium flex items-center gap-1 bg-amber-50 hover:bg-amber-100 px-2.5 py-1 rounded-md border border-amber-200 transition shadow-sm"
-                                                        >
-                                                            <i className="fa-solid fa-triangle-exclamation"></i> รายการคีย์ซ้ำ
-                                                        </button>
-                                                    )}
-                                                </div>
-                                            </td>
-                                            
-                                            <td className="p-4 text-slate-500 text-xs">{formatDisplayDate(row.date)}</td>
+                                    {historyItems.map((row) => {
+                                        // ตรวจสอบสถานะหมดอายุแยกต่างหากเพื่อใช้แสดงผลปุ่ม/เวลา
+                                        const isExpired = (() => {
+                                            if (!row.date) return false;
+                                            const normalizedStr = typeof row.date === 'string' ? row.date.replace(' ', 'T') : row.date;
+                                            const createdDate = new Date(normalizedStr);
+                                            if (isNaN(createdDate.getTime())) return false;
+                                            const expiryDate = new Date(createdDate.getTime() + 24 * 60 * 60 * 1000);
+                                            return currentTime >= expiryDate;
+                                        })();
 
-                                            <td className="p-4 text-center">
-                                                {row.status === 'done' && (
-                                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700 border border-emerald-200">
-                                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> เสร็จแล้ว
-                                                    </span>
-                                                )}
-                                                {row.status === 'processing' && (
-                                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-700 border border-amber-200">
-                                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span> กำลังคำนวน
-                                                    </span>
-                                                )}
-                                                {row.status === 'error' && (
-                                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-rose-100 text-rose-700 border border-rose-200">
-                                                        <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span> เกิดข้อผิดพลาด
-                                                    </span>
-                                                )}
-                                                {row.status === 'expired' && (
-                                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-600 border border-slate-200">
-                                                        <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span> หมดอายุ
-                                                    </span>
-                                                )}
-                                            </td>
-                                            <td className="p-4 text-center">
-                                                <div className="w-24 bg-slate-200 rounded-full h-2 mx-auto overflow-hidden">
-                                                    <div 
-                                                        className={`h-2 rounded-full ${
-                                                            row.status === 'processing' ? 'bg-amber-500 animate-pulse' :
-                                                            row.status === 'error' ? 'bg-rose-500' :
-                                                            'bg-emerald-500'
-                                                        }`} 
-                                                        style={{ width: `${row.progress}%` }}
-                                                    ></div>
-                                                </div>
-                                            </td>
-                                            <td className="p-4 text-center text-slate-600 text-xs font-semibold">
-                                                {row.records.toLocaleString()} รายการ
-                                            </td>
-                                            <td className="p-4 text-center text-xs font-medium">
-                                                {row.status === 'done' ? (
-                                                    <span className="text-teal-600">{formatTimeRemaining(row.date)}</span>
-                                                ) : row.status === 'processing' ? (
-                                                    <span className="text-amber-600">กำลังประมวลผล...</span>
-                                                ) : (
-                                                    <span className="text-rose-500">-</span>
-                                                )}
-                                            </td>
-                                            <td className="p-4 text-center">
-                                                <div className="flex flex-col gap-1.5 items-center">
-                                                    <button 
-                                                        onClick={() => handleDownloadHistory(row)}
-                                                        disabled={row.status === 'expired' || row.status === 'processing' || row.status === 'error'}
-                                                        className={`px-3 py-1 rounded text-xs font-medium transition shadow-sm ${
-                                                            row.status === 'expired' || row.status === 'processing' || row.status === 'error'
-                                                            ? 'bg-slate-200 text-slate-400 cursor-not-allowed' 
-                                                            : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
-                                                        }`}
-                                                    >
-                                                        ดาวน์โหลด
-                                                    </button>
-                                                    <button 
-                                                        onClick={() => handleDeleteHistory(row.id)}
-                                                        className="px-3 py-1 rounded text-xs font-medium bg-rose-50 border border-rose-200 text-rose-600 hover:bg-rose-100 transition shadow-sm"
-                                                    >
-                                                        ลบ
-                                                    </button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    ))}
+                                        return (
+                                            <tr key={row.id} className="hover:bg-slate-50/50 transition">
+                                                <td className="p-4 text-center text-slate-500">{row.id}</td>
+                                                <td className="p-4 text-slate-700 font-medium">{row.type}</td>
+                                                <td className="p-4">
+                                                    <div className="flex flex-col gap-1.5 items-start">
+                                                        <div className="text-slate-700 text-xs bg-slate-100 px-2.5 py-1 rounded-md inline-block">{row.condition}</div>
+                                                        {row.duplicateDetails && row.duplicateDetails.length > 0 && (
+                                                            <button 
+                                                                onClick={() => setActiveDuplicateModalData(row.duplicateDetails)}
+                                                                className="text-xs text-amber-600 hover:text-amber-700 font-medium flex items-center gap-1 bg-amber-50 hover:bg-amber-100 px-2.5 py-1 rounded-md border border-amber-200 transition shadow-sm"
+                                                            >
+                                                                <i className="fa-solid fa-triangle-exclamation"></i> รายการคีย์ซ้ำ
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                </td>
+                                                
+                                                <td className="p-4 text-slate-500 text-xs">{formatDisplayDate(row.date)}</td>
+
+                                                {/* คอลัมน์สถานะ: แสดงสถานะของกระบวนการทำงานจริง ๆ เท่านั้น ไม่ถูกเปลี่ยนเป็น "หมดอายุ" */}
+                                                <td className="p-4 text-center">
+                                                    {row.status === 'done' && (
+                                                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700 border border-emerald-200">
+                                                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> เสร็จแล้ว
+                                                        </span>
+                                                    )}
+                                                    {row.status === 'processing' && (
+                                                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-700 border border-amber-200">
+                                                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span> กำลังคำนวน
+                                                        </span>
+                                                    )}
+                                                    {row.status === 'error' && (
+                                                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-rose-100 text-rose-700 border border-rose-200">
+                                                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span> เกิดข้อผิดพลาด
+                                                        </span>
+                                                    )}
+                                                </td>
+                                                <td className="p-4 text-center">
+                                                    <div className="w-24 bg-slate-200 rounded-full h-2 mx-auto overflow-hidden">
+                                                        <div 
+                                                            className={`h-2 rounded-full ${
+                                                                row.status === 'processing' ? 'bg-amber-500 animate-pulse' :
+                                                                row.status === 'error' ? 'bg-rose-500' :
+                                                                'bg-emerald-500'
+                                                            }`} 
+                                                            style={{ width: `${row.progress}%` }}
+                                                        ></div>
+                                                    </div>
+                                                </td>
+                                                <td className="p-4 text-center text-slate-600 text-xs font-semibold">
+                                                    {row.records.toLocaleString()} รายการ
+                                                </td>
+                                                <td className="p-4 text-center text-xs font-medium">
+                                                    {row.status === 'done' ? (
+                                                        <span className={isExpired ? "text-rose-500" : "text-teal-600"}>{formatTimeRemaining(row.date)}</span>
+                                                    ) : row.status === 'processing' ? (
+                                                        <span className="text-amber-600">กำลังประมวลผล...</span>
+                                                    ) : (
+                                                        <span className="text-rose-500">-</span>
+                                                    )}
+                                                </td>
+                                                <td className="p-4 text-center">
+                                                    <div className="flex flex-col gap-1.5 items-center">
+                                                        <button 
+                                                            onClick={() => handleDownloadHistory(row)}
+                                                            disabled={isExpired || row.status === 'processing' || row.status === 'error' || !row.driveFileId}
+                                                            className={`px-3 py-1 rounded text-xs font-medium transition shadow-sm ${
+                                                                isExpired || row.status === 'processing' || row.status === 'error' || !row.driveFileId
+                                                                ? 'bg-slate-200 text-slate-400 cursor-not-allowed' 
+                                                                : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
+                                                            }`}
+                                                        >
+                                                            ดาวน์โหลด
+                                                        </button>
+                                                        <button 
+                                                            onClick={() => handleDeleteHistory(row.id)}
+                                                            className="px-3 py-1 rounded text-xs font-medium bg-rose-50 border border-rose-200 text-rose-600 hover:bg-rose-100 transition shadow-sm"
+                                                        >
+                                                            ลบ
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         </div>
