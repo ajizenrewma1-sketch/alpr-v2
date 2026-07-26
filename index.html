@@ -13,8 +13,9 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.21.4/babel.min.js"></script>
     
-    <!-- โหลด Google Identity Services -->
-    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <!-- โหลด Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-storage-compat.js"></script>
     
     <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     
@@ -49,6 +50,20 @@
 
     <script type="text/babel">
         const { useState, useEffect } = React;
+
+        // ตั้งค่า Firebase - กรุณาใส่ Config ของโปรเจกต์คุณที่นี่
+        const firebaseConfig = {
+    apiKey: "AIzaSyC4w1rc9ay5d-Ctp8w8fMWhJfzC8jm0VKc",
+    authDomain: "alpr-v2.firebaseapp.com",
+    projectId: "alpr-v2",
+    storageBucket: "alpr-v2.firebasestorage.app",
+    messagingSenderId: "525759949332",
+    appId: "1:525759949332:web:fc65c1c2e1b5ec5b9ed501"
+  };
+
+        if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
 
         const formatDisplayDate = (dateStr) => {
             if (!dateStr) return '-';
@@ -93,35 +108,6 @@
             const [resetKey, setResetKey] = useState(0);
             const [currentTime, setCurrentTime] = useState(new Date());
             const [historyItems, setHistoryItems] = useState([]);
-            const [isDownloading, setIsDownloading] = useState(false);
-            const [downloadMessage, setDownloadMessage] = useState("กำลังเตรียมไฟล์สำหรับดาวน์โหลด...");
-
-            // State สำหรับ Google Drive Upload
-            const [googleAccessToken, setGoogleAccessToken] = useState(null);
-            const [tokenClient, setTokenClient] = useState(null);
-            const [uploadFile, setUploadFile] = useState(null);
-
-            // ตั้งค่าระบบ Google OAuth
-            useEffect(() => {
-                const initGoogle = () => {
-                    if (typeof google !== 'undefined' && google.accounts) {
-                        const client = google.accounts.oauth2.initTokenClient({
-                            client_id: '395374134249-mgi5h4kguf2g0dva4bl870a6jkjb0ct9.apps.googleusercontent.com', 
-                            scope: 'https://www.googleapis.com/auth/drive.file',
-                            callback: (response) => {
-                                if (response.access_token) {
-                                    setGoogleAccessToken(response.access_token);
-                                    alert("เชื่อมต่อ Google Drive สำเร็จเรียบร้อย!");
-                                }
-                            },
-                        });
-                        setTokenClient(client);
-                    } else {
-                        setTimeout(initGoogle, 500);
-                    }
-                };
-                initGoogle();
-            }, []);
 
             const fetchHistoryFromCloud = async () => {
                 try {
@@ -155,7 +141,7 @@
                             const expiryDate = new Date(createdDate.getTime() + 24 * 60 * 60 * 1000);
                             
                             if (now >= expiryDate) {
-                                if (item.driveFileId) deleteFileFromGoogleDrive(item.driveFileId);
+                                if (item.driveFileId) deleteFileFromFirebase(item.driveFileId);
                                 return { ...item, status: 'expired', driveFileId: '' };
                             }
                             return item;
@@ -165,67 +151,12 @@
                 return () => clearInterval(timer);
             }, []);
 
-            // ฟังก์ชันอัปโหลด Google Drive โดยตรง
-            const handleGoogleAuthClick = () => {
-                if (tokenClient) {
-                    tokenClient.requestAccessToken({ prompt: 'consent' });
-                } else {
-                    alert("กำลังโหลดระบบ Google กรุณารอสักครู่...");
-                }
-            };
-
-            const handleGoogleUpload = async () => {
-                if (!googleAccessToken) {
-                    alert("กรุณากด 'เชื่อมต่อบัญชี Google Drive' ก่อนครับ!");
-                    return;
-                }
-                if (!uploadFile) {
-                    alert("กรุณาเลือกไฟล์ที่ต้องการอัปโหลดก่อนครับ!");
-                    return;
-                }
-
-                alert(`กำลังอัปโหลดไฟล์ "${uploadFile.name}" ขึ้น Google Drive...`);
-
-                try {
-                    const metadata = { name: uploadFile.name, mimeType: uploadFile.type || 'application/octet-stream' };
-                    const initResponse = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': `Bearer ${googleAccessToken}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify(metadata)
-                    });
-
-                    if (!initResponse.ok) throw new Error("ไม่สามารถสร้างเซสชันการอัปโหลดได้");
-                    
-                    const uploadUrl = initResponse.headers.get('Location');
-                    const uploadResponse = await fetch(uploadUrl, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': uploadFile.type || 'application/octet-stream' },
-                        body: uploadFile
-                    });
-
-                    if (uploadResponse.ok) {
-                        alert("อัปโหลดไฟล์ขึ้น Google Drive สำเร็จเรียบร้อยแล้ว!");
-                        setUploadFile(null); 
-                        setResetKey(prev => prev + 1); // รีเซ็ตหน้าต่างเลือกไฟล์
-                    } else {
-                        throw new Error("เกิดข้อผิดพลาดในการอัปโหลดไฟล์");
-                    }
-                } catch (error) {
-                    console.error(error);
-                    alert("เกิดข้อผิดพลาด: " + error.message);
-                }
-            };
-
             // Soft Logout ล้างข้อมูลโดยไม่โหลดหน้าใหม่
             const handleSoftLogout = () => {
                 setActiveMenu('home');
                 setFileAll({ name: '', headers: [], rows: [], originalWs: null });
                 setFileR05({ name: '', headers: [], rows: [], originalWs: null });
                 setResults(null);
-                setUploadFile(null);
                 setResetKey(prev => prev + 1);
                 alert("ออกจากระบบเรียบร้อยแล้ว");
             };
@@ -265,78 +196,61 @@
                 return newWb;
             };
 
-            const uploadToGoogleDrive = async (fileName, matchedRows) => {
+            const uploadToFirebase = async (fileName, matchedRows) => {
                 try {
                     const wb = buildMatchedWorkbook(matchedRows);
                     if (!wb) return "error_file_id";
 
-                    const base64Data = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+                    const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+                    const blob = new Blob([wbout], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 
-                    const payload = {
-                        filename: fileName || "M-Flow_Report.xlsx",
-                        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        base64Data: base64Data
-                    };
-
-                    const response = await fetch(GAS_URL, {
-                        method: "POST",
-                        body: JSON.stringify(payload)
-                    });
-
-                    const result = await response.json();
-                    return result.status === "success" ? result.fileId : "error_file_id";
+                    const storage = firebase.storage();
+                    const uniqueFileName = `Matched_Reports/${Date.now()}_${fileName || "M-Flow_Report.xlsx"}`;
+                    const storageRef = storage.ref(uniqueFileName);
+                    
+                    await storageRef.put(blob);
+                    const downloadURL = await storageRef.getDownloadURL();
+                    
+                    return downloadURL;
                 } catch (error) {
+                    console.error("Firebase upload error:", error);
                     return "error_file_id";
                 }
             };
 
-            const deleteFileFromGoogleDrive = async (fileId) => {
-                if (!fileId) return;
+            const deleteFileFromFirebase = async (fileUrl) => {
+                if (!fileUrl || fileUrl === "error_file_id" || !fileUrl.includes('firebasestorage')) return;
                 try {
-                    await fetch(`${GAS_URL}?action=delete&fileId=${fileId}`);
+                    const storage = firebase.storage();
+                    const fileRef = storage.refFromURL(fileUrl);
+                    await fileRef.delete();
                 } catch (err) {
-                    console.error("Failed to delete file from cloud:", err);
+                    console.error("Failed to delete file from Firebase:", err);
                 }
             };
 
             const handleDownloadHistory = (item) => {
-                if (item.status === 'expired' || item.status === 'error' || !item.driveFileId) {
-                    alert("ไม่สามารถดาวน์โหลดได้ เนื่องจากไฟล์หมดอายุ เกิดข้อผิดพลาด หรือไม่พบรหัสไฟล์ในระบบ");
+                if (item.status === 'expired' || item.status === 'error' || !item.driveFileId || item.driveFileId === "error_file_id") {
+                    alert("ไม่สามารถดาวน์โหลดได้ เนื่องจากไฟล์หมดอายุ เกิดข้อผิดพลาด หรือไม่พบลิงก์ไฟล์ในระบบ");
                     return;
                 }
-
-                setIsDownloading(true);
-                setDownloadMessage("กำลังเชื่อมต่อเพื่อดาวน์โหลดไฟล์...");
-
-                try {
-                    const downloadUrl = `https://drive.google.com/uc?export=download&id=${item.driveFileId}`;
-                    
-                    setDownloadMessage("กำลังดาวน์โหลดไฟล์ลงเครื่อง...");
-
-                    const iframe = document.createElement('iframe');
-                    iframe.style.display = 'none';
-                    iframe.src = downloadUrl;
-                    document.body.appendChild(iframe);
-
-                    setTimeout(() => {
-                        try {
-                            document.body.removeChild(iframe);
-                        } catch (e) {}
-                        setIsDownloading(false);
-                    }, 3500);
-
-                } catch (err) {
-                    console.error("Download failed:", err);
-                    alert("เกิดข้อผิดพลาดในการดาวน์โหลด กรุณาลองใหม่อีกครั้ง");
-                    setIsDownloading(false);
-                }
+                // ดาวน์โหลดโดยตรงจาก URL ของ Firebase Storage
+                window.open(item.driveFileId, '_blank');
             };
 
             const handleDeleteHistory = async (id) => {
                 const item = historyItems.find(i => i.id === id);
-                if (item) {
-                    await fetch(`${GAS_URL}?action=delete&fileId=${item.driveFileId || ''}&id=${id}`);
+                if (item && item.driveFileId) {
+                    await deleteFileFromFirebase(item.driveFileId);
                 }
+                
+                // ลบประวัติบน GAS
+                try {
+                    await fetch(`${GAS_URL}?action=delete&id=${id}`);
+                } catch (err) {
+                    console.error("Failed to delete history record on GAS:", err);
+                }
+                
                 setHistoryItems(prev => prev.filter(i => i.id !== id));
             };
 
@@ -369,7 +283,6 @@
                 setResults(null);
                 setIsProcessing(false);
                 setActiveDuplicateModalData(null);
-                setUploadFile(null); // เคลียร์ไฟล์ฝั่ง Google Drive อัปโหลดด้วย
                 setResetKey(prev => prev + 1);
             };
 
@@ -478,7 +391,7 @@
                     status: 'processing',
                     progress: 50,
                     records: 0,
-                    driveFileId: '',
+                    driveFileId: '', // จะใช้เก็บ URL ของ Firebase แทน
                     duplicateDetails: []
                 };
 
@@ -544,7 +457,7 @@
                         }
                     } else {
                         try {
-                            const fileId = await uploadToGoogleDrive("Matched_Result.xlsx", matchedRows);
+                            const fileUrl = await uploadToFirebase("Matched_Result.xlsx", matchedRows);
                             
                             setHistoryItems(prev => prev.map(item => {
                                 if (item.id === newHistoryId) {
@@ -553,14 +466,15 @@
                                         status: 'done',
                                         progress: 100,
                                         records: matchedRows.length,
-                                        driveFileId: fileId,
+                                        driveFileId: fileUrl, // อัปเดต state เป็นลิงก์ Firebase 
                                         duplicateDetails: duplicateDetails
                                     };
                                 }
                                 return item;
                             }));
 
-                            await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=done&records=${matchedRows.length}&driveFileId=${fileId}`);
+                            // ยังคงส่งเข้าไปในพารามิเตอร์ชื่อ driveFileId ใน GAS เพื่อไม่ให้กระทบโครงสร้าง Database ฝั่ง GAS 
+                            await fetch(`${GAS_URL}?action=updateHistory&id=${newHistoryId}&status=done&records=${matchedRows.length}&driveFileId=${encodeURIComponent(fileUrl)}`);
                         } catch (err) {
                             console.error("Failed to upload file or update history on cloud:", err);
                         }
@@ -612,43 +526,6 @@
                             <p className="text-sm text-slate-500">
                                 ติดตามสถานะคิวงาน และดาวน์โหลดไฟล์ที่ดำเนินการเสร็จแล้วย้อนหลัง
                             </p>
-                        </div>
-                    </div>
-
-                    {/* กล่องอัปโหลด Google Drive */}
-                    <div className="mt-8 bg-white p-6 rounded-xl shadow-sm border border-slate-200 max-w-3xl animate-fade-in">
-                        <div className="flex items-center gap-3 mb-4">
-                            <div className="w-10 h-10 bg-blue-50 text-blue-500 rounded-lg flex items-center justify-center">
-                                <i className="fa-brands fa-google-drive text-lg"></i>
-                            </div>
-                            <div>
-                                <h3 className="font-semibold text-slate-800">ระบบอัปโหลดไฟล์ด่วนเข้า Google Drive</h3>
-                                <p className="text-sm text-slate-500">สำรองข้อมูลหรืออัปโหลดไฟล์ขนาดใหญ่ขึ้นคลาวด์โดยตรง</p>
-                            </div>
-                        </div>
-                        
-                        <div className="flex flex-col md:flex-row gap-4 items-end bg-slate-50 p-4 rounded-lg border border-slate-100">
-                            <div className="flex-1 w-full">
-                                <button 
-                                    onClick={handleGoogleAuthClick}
-                                    className={`w-full py-2.5 px-4 rounded-md text-sm font-medium transition-all mb-3 ${googleAccessToken ? 'bg-emerald-100 text-emerald-700 border border-emerald-200 cursor-default' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm'}`}
-                                >
-                                    {googleAccessToken ? <><i className="fa-solid fa-check-circle mr-2"></i>เชื่อมต่อบัญชีสำเร็จแล้ว</> : '1. เชื่อมต่อบัญชี Google Drive'}
-                                </button>
-                                <input 
-                                    key={`gdrive-upload-${resetKey}`}
-                                    type="file" 
-                                    onChange={(e) => setUploadFile(e.target.files[0])}
-                                    className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:bg-slate-200 file:text-slate-700 hover:file:bg-slate-300 file:font-medium file:cursor-pointer border border-slate-200 rounded-md bg-white"
-                                />
-                            </div>
-                            <button 
-                                onClick={handleGoogleUpload}
-                                disabled={!googleAccessToken || !uploadFile}
-                                className={`py-2.5 px-6 rounded-md text-sm font-medium transition-all whitespace-nowrap h-[42px] ${(!googleAccessToken || !uploadFile) ? 'bg-slate-300 text-slate-500 cursor-not-allowed' : 'bg-teal-600 hover:bg-teal-700 text-white shadow-sm'}`}
-                            >
-                                2. อัปโหลดขึ้น Drive
-                            </button>
                         </div>
                     </div>
                 </div>
@@ -1002,18 +879,6 @@
                                             ))}
                                         </tbody>
                                     </table>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {isDownloading && (
-                        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-50 p-4 backdrop-blur-sm animate-fade-in">
-                            <div className="bg-white rounded-xl shadow-2xl p-6 max-w-sm w-full flex flex-col items-center text-center space-y-4">
-                                <div className="w-12 h-12 border-4 border-amber-500 border-t-transparent rounded-full animate-spin"></div>
-                                <div>
-                                    <h3 className="font-bold text-slate-800 text-lg">กำลังดาวน์โหลด</h3>
-                                    <p className="text-slate-500 text-sm mt-1">{downloadMessage}</p>
                                 </div>
                             </div>
                         </div>
