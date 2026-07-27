@@ -287,7 +287,8 @@
                 setDownloadMessage("กำลังเชื่อมต่อเพื่อดาวน์โหลดไฟล์...");
 
                 try {
-                    const downloadUrl = `https://drive.google.com/uc?export=download&id=${item.driveFileId}`;
+                    // เพิ่ม &confirm=t เพื่อข้ามหน้าจอเตือนไวรัส/ยืนยันการดาวน์โหลดของ Google Drive
+                    const downloadUrl = `https://drive.google.com/uc?export=download&confirm=t&id=${item.driveFileId}`;
                     
                     setDownloadMessage("กำลังดาวน์โหลดไฟล์ลงเครื่อง...");
 
@@ -296,12 +297,13 @@
                     iframe.src = downloadUrl;
                     document.body.appendChild(iframe);
 
+                    // ขยายเวลาเป็น 6 วินาที ป้องกันการตัด Iframe ก่อนดาวน์โหลดเสร็จ
                     setTimeout(() => {
                         try {
                             document.body.removeChild(iframe);
                         } catch (e) {}
                         setIsDownloading(false);
-                    }, 3500);
+                    }, 6000);
 
                 } catch (err) {
                     console.error("Download failed:", err);
