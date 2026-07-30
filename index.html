@@ -92,18 +92,20 @@
             const [isDownloading, setIsDownloading] = useState(false);
             const [downloadMessage, setDownloadMessage] = useState("กำลังเตรียมไฟล์สำหรับดาวน์โหลด...");
 
+            // State ใหม่สำหรับเก็บช่วงเวลา
+            const [availableTimePeriods, setAvailableTimePeriods] = useState([]);
+            const [selectedTimePeriods, setSelectedTimePeriods] = useState([]);
+
             const fetchHistoryFromCloud = async () => {
                 try {
                     const response = await fetch(`${GAS_URL}?action=getHistory`);
                     const data = await response.json();
                     if (Array.isArray(data)) {
                         setHistoryItems(prevItems => {
-                            // 1. ดึงรายการในเครื่องที่กำลังคำนวณหรือกำลังอัปโหลดอยู่
                             const inProgressLocalItems = prevItems.filter(
                                 item => item.status === 'calculating' || item.status === 'uploading'
                             );
 
-                            // 2. นำข้อมูลจาก Cloud มาแมตช์ แต่รักษาสถานะกำลังทำในเครื่องไว้
                             const mergedCloudItems = data.map(cloudItem => {
                                 const localItem = prevItems.find(p => p.id === cloudItem.id);
                                 if (localItem && (localItem.status === 'calculating' || localItem.status === 'uploading')) {
@@ -115,7 +117,6 @@
                                 return cloudItem;
                             });
 
-                            // 3. รวมรายการที่กำลังทำอยู่เข้ากับข้อมูลจาก Cloud โดยป้องกันไม่ให้ซ้ำกัน
                             const cloudIds = new Set(mergedCloudItems.map(i => i.id));
                             const uniqueLocalInProgress = inProgressLocalItems.filter(i => !cloudIds.has(i.id));
 
@@ -136,7 +137,6 @@
 
                     setHistoryItems(prevItems =>
                         prevItems.map(item => {
-                            // ปรับปรุงเงื่อนไข: ไม่เปลี่ยนสถานะเป็น expired แล้ว แต่จะให้ระบบจัดการลบไฟล์ใน Drive เมื่อครบกำหนดแทน
                             if (item.status === 'expired' || item.status === 'error' || item.status === 'processing') return item;
                             if (!item.date) return item;
 
@@ -150,7 +150,7 @@
                             if (now >= expiryDate) {
                                 if (item.driveFileId) {
                                     deleteFileFromGoogleDrive(item.driveFileId);
-                                    return { ...item, driveFileId: '' }; // ลบ fileId ทิ้งแต่คงสถานะ 'done' ไว้ตามเดิม
+                                    return { ...item, driveFileId: '' };
                                 }
                             }
                             return item;
@@ -160,11 +160,29 @@
                 return () => clearInterval(timer);
             }, []);
 
-	    useEffect(() => {
+            useEffect(() => {
                 if (activeMenu === 'history') {
                     fetchHistoryFromCloud();
                 }
             }, [activeMenu]);
+
+            // Effect ใหม่สำหรับดึงช่วงเวลาจาก R05 มาเป็นตัวเลือก
+            useEffect(() => {
+                if (fileR05.rows && fileR05.rows.length > 0) {
+                    const periods = new Set();
+                    fileR05.rows.forEach(row => {
+                        const val = row["ช่วงเวลา"];
+                        if (val !== undefined && val !== null && val !== "") {
+                            periods.add(String(val).trim());
+                        }
+                    });
+                    setAvailableTimePeriods(Array.from(periods).sort());
+                    setSelectedTimePeriods([]);
+                } else {
+                    setAvailableTimePeriods([]);
+                    setSelectedTimePeriods([]);
+                }
+            }, [fileR05.rows]);
 
             const parseLocalDate = (dateStr) => {
                 if (!dateStr || typeof dateStr !== 'string') {
@@ -268,7 +286,6 @@
             };
 
             const handleDownloadHistory = (item) => {
-                // เช็คเงื่อนไขหมดอายุจากเวลาแทนสถานะ
                 const isExpired = (() => {
                     if (!item.date) return false;
                     const normalizedStr = typeof item.date === 'string' ? item.date.replace(' ', 'T') : item.date;
@@ -287,30 +304,30 @@
                 setDownloadMessage("กำลังเชื่อมต่อเพื่อดาวน์โหลดไฟล์...");
 
                 try {
-                    // เพิ่ม &confirm=t เพื่อข้ามหน้าจอเตือนไวรัส/ยืนยันการดาวน์โหลดของ Google Drive
                     const downloadUrl = `https://drive.google.com/uc?export=download&confirm=t&id=${item.driveFileId}`;
                     
                     setDownloadMessage("กำลังดาวน์โหลดไฟล์ลงเครื่อง...");
 
-                    const iframe = document.createElement('iframe');
-                    iframe.style.display = 'none';
-                    iframe.src = downloadUrl;
-                    document.body.appendChild(iframe);
+                    const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.target = '_blank'; // สำคัญมาก: ช่วยป้องกัน Google Drive บล็อก X-Frame-Options
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
 
-                    // ขยายเวลาเป็น 6 วินาที ป้องกันการตัด Iframe ก่อนดาวน์โหลดเสร็จ
-                    setTimeout(() => {
-                        try {
-                            document.body.removeChild(iframe);
-                        } catch (e) {}
-                        setIsDownloading(false);
-                    }, 6000);
+        // ลดเวลาหมุนโหลดของ Popup ลงเหลือ 2.5 วินาที
+        // เพราะเบราว์เซอร์รับช่วงต่อการดาวน์โหลดไปแล้ว
+        setTimeout(() => {
+            setIsDownloading(false);
+        }, 2500); 
+        // ===================================
 
-                } catch (err) {
-                    console.error("Download failed:", err);
-                    alert("เกิดข้อผิดพลาดในการดาวน์โหลด กรุณาลองใหม่อีกครั้ง");
-                    setIsDownloading(false);
-                }
-            };
+    } catch (err) {
+        console.error("Download failed:", err);
+        alert("เกิดข้อผิดพลาดในการดาวน์โหลด กรุณาลองใหม่อีกครั้ง");
+        setIsDownloading(false);
+    }
+};
 
             const handleDeleteHistory = async (id) => {
                 const item = historyItems.find(i => i.id === id);
@@ -350,6 +367,8 @@
                 setIsProcessing(false);
                 setActiveDuplicateModalData(null);
                 setResetKey(prev => prev + 1);
+                setAvailableTimePeriods([]);
+                setSelectedTimePeriods([]);
             };
 
             const handleFileUpload = (e, type) => {
@@ -449,10 +468,17 @@
                 const nowStr = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 
                 const newHistoryId = historyItems.length > 0 ? Math.max(...historyItems.map(i => i.id)) + 1 : 1;
+                
+                // กำหนด condition เพื่อแสดงว่ามีการกรองช่วงเวลาหรือไม่
+                let conditionText = 'All + R05 (ALPR)';
+                if (selectedTimePeriods.length > 0) {
+                    conditionText += ` | ช่วงเวลา: ${selectedTimePeriods.join(', ')}`;
+                }
+
                 const initialHistoryItem = {
                     id: newHistoryId,
                     type: 'ชนข้อมูล (Match)',
-                    condition: 'All + R05 (ALPR)',
+                    condition: conditionText,
                     date: nowStr,
                     status: 'calculating',
                     progress: 20,
@@ -464,8 +490,15 @@
                 setHistoryItems(prev => [initialHistoryItem, ...prev]);
 
                 setTimeout(async () => {
-                    // ขั้นตอนที่ 1: กำลังคำนวณ
-                    const filteredR05 = fileR05.rows.filter(r => String(r["ประเภทระบบ"]) === "ALPR");
+                    // ขั้นตอนที่ 1: กำลังคำนวณ โดยเช็คช่วงเวลาด้วย
+                    const filteredR05 = fileR05.rows.filter(r => {
+                        const isALPR = String(r["ประเภทระบบ"]) === "ALPR";
+                        const period = String(r["ช่วงเวลา"] || "").trim();
+                        // ถ้าไม่ได้เลือกช่วงเวลาใดๆ เลย (length === 0) ให้อนุญาตทั้งหมด
+                        const isSelectedPeriod = selectedTimePeriods.length === 0 || selectedTimePeriods.includes(period);
+                        return isALPR && isSelectedPeriod;
+                    });
+                    
                     const mapR05 = new Map();
                     filteredR05.forEach(row => {
                         const key = generateKey(row, keyColsR05, false);
@@ -508,7 +541,6 @@
                             return item;
                         }));
                     } else {
-                        // เปลี่ยนสถานะเป็น "กำลังอัปโหลด"
                         setHistoryItems(prev => prev.map(item => {
                             if (item.id === newHistoryId) {
                                 return { ...item, status: 'uploading', progress: 40, duplicateDetails: duplicateDetails };
@@ -516,7 +548,6 @@
                             return item;
                         }));
 
-                        // สร้าง Fake Progress ค่อยๆ ขยับหลอดความคืบหน้าขึ้นไปรอ (จาก 40 ไปจนถึง 90)
                         let fakeProgress = 40;
                         const progressInterval = setInterval(() => {
                             fakeProgress += 5;
@@ -529,10 +560,8 @@
                             }));
                         }, 250);
 
-                        // ทำการอัปโหลดจริงด้วย fetch ไฟล์ขึ้น Drive
                         const fileId = await uploadToGoogleDrive("Matched_Result.xlsx", matchedRows);
 
-                        // เคลียร์ Timer เมื่ออัปโหลดเสร็จสิ้น
                         clearInterval(progressInterval);
                         setIsProcessing(false);
 
@@ -547,7 +576,7 @@
                             const finalItem = {
                                 id: newHistoryId,
                                 type: 'ชนข้อมูล (Match)',
-                                condition: 'All + R05 (ALPR)',
+                                condition: conditionText,
                                 date: nowStr,
                                 status: 'done',
                                 progress: 100,
@@ -563,7 +592,6 @@
                                 return item;
                             }));
 
-                            // บันทึกลง Google Sheet พร้อมแปลง duplicateDetails เป็น JSON String
                             try {
                                 await fetch(GAS_URL, {
                                     method: 'POST',
@@ -724,6 +752,38 @@
                             </div>
                         )}
 
+                        {/* เพิ่ม ขั้นตอนที่ 3 */}
+                        {fileR05.headers.length > 0 && availableTimePeriods.length > 0 && (
+                            <div className="p-6 border-b border-slate-100">
+                                <h2 className="text-sm font-semibold text-slate-700 mb-4 flex items-center gap-2">
+                                    <span className="bg-slate-200 text-slate-600 w-6 h-6 rounded-full flex items-center justify-center text-xs">3</span> 
+                                    เลือกช่วงเวลา (จากไฟล์ R05)
+                                </h2>
+                                <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                                    <label className="block text-xs font-medium text-slate-600 mb-3">สามารถเลือกได้มากกว่า 1 ช่วงเวลา (หากไม่เลือกเลย ระบบจะดึงข้อมูลของทุกช่วงเวลา)</label>
+                                    <div className="flex flex-wrap gap-3">
+                                        {availableTimePeriods.map((period, idx) => (
+                                            <label key={idx} className="flex items-center gap-2 bg-white px-3 py-2 rounded border border-slate-300 shadow-sm cursor-pointer hover:bg-slate-100 transition">
+                                                <input 
+                                                    type="checkbox" 
+                                                    className="accent-brandYellow w-4 h-4 cursor-pointer"
+                                                    checked={selectedTimePeriods.includes(period)}
+                                                    onChange={(e) => {
+                                                        if (e.target.checked) {
+                                                            setSelectedTimePeriods([...selectedTimePeriods, period]);
+                                                        } else {
+                                                            setSelectedTimePeriods(selectedTimePeriods.filter(p => p !== period));
+                                                        }
+                                                    }}
+                                                />
+                                                <span className="text-sm text-slate-700">{period}</span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
                         <div className="p-6 bg-slate-50/30 flex items-center gap-3">
                             <button 
                                 onClick={runMatching}
@@ -805,7 +865,6 @@
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {historyItems.map((row) => {
-                                        // ตรวจสอบสถานะหมดอายุแยกต่างหากเพื่อใช้แสดงผลปุ่ม/เวลา
                                         const isExpired = (() => {
                                             if (!row.date) return false;
                                             const normalizedStr = typeof row.date === 'string' ? row.date.replace(' ', 'T') : row.date;
@@ -835,7 +894,6 @@
                                                 
                                                 <td className="p-4 text-slate-500 text-xs">{formatDisplayDate(row.date)}</td>
 
-                                                {/* คอลัมน์สถานะ: แสดงสถานะของกระบวนการทำงานจริง ๆ เท่านั้น ไม่ถูกเปลี่ยนเป็น "หมดอายุ" */}
                                                 <td className="p-4 text-center">
                                                     {row.status === 'done' && (
                                                         <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700 border border-emerald-200">
